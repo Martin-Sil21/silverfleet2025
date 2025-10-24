@@ -77,7 +77,8 @@ const App: React.FC = () => {
       case AuditStatus.IMPROVING:
         return <AuditProgress message={progressMessage} title={t('improvementInProgress')} />;
       case AuditStatus.REPORT_READY:
-        return <AuditReport results={auditResults} onReset={handleReset} onStartImprovement={handleStartImprovement} />;
+        if (!auditConfig) return null; // Should not happen
+        return <AuditReport results={auditResults} onReset={handleReset} onStartImprovement={handleStartImprovement} config={auditConfig} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !originalAuditResults.length || !auditConfig) {
             return (

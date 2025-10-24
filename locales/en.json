@@ -24,6 +24,8 @@
   "overallAverageScore": "Overall Average Score",
   "showLog": "Show Conversation Log",
   "hideLog": "Hide Conversation Log",
+  "showVisualTrace": "Show Visual Trace",
+  "hideVisualTrace": "Hide Visual Trace",
   "criteriaBreakdown": "Criteria Breakdown",
   "runNewAudit": "Run New Audit",
   "suggestImprovements": "Suggest & Test Improvements",
@@ -42,10 +44,15 @@
   "agentNodeTitle": "AI Agent Step: {name}",
   "toolNodeTitle": "Tool Step: {name}",
   "toolNodeType": "Node Type: {type}",
-  "toolSimulationDescription": "Provide a simulated output for this tool. This text will be passed as context to the next step in the workflow.",
+  "toolSimulationAuto": "This tool's output will be automatically simulated by AI during the audit based on its type and the current context.",
   "toolOutputPlaceholder": "e.g., Paste a sample JSON, or describe the data this tool provides...",
   "defaultCriteria1": "No Hallucinations",
   "defaultCriteria2": "Maintains Context",
   "defaultCriteria3": "Human-like Tone",
-  "defaultCriteria4": "Follows Instructions"
+  "defaultCriteria4": "Follows Instructions",
+  "traceStep": "Step {step} of {total}",
+  "inputFor": "Input For",
+  "outputFrom": "Output From",
+  "suggestCriteria": "Suggest Criteria",
+  "suggestingCriteria": "Suggesting..."
 }
