@@ -147,20 +147,48 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     const isWorkflowValid = workflow.every(node => 
       node.type === 'tool' || (node.type === 'agent' && node.systemPrompt.trim())
     );
-    if (isWorkflowValid && criteria.length > 0) {
-      const config: AuditConfig = {
-        workflow,
-        criteria,
-        testCaseCount,
-        useRealExecution,
-        ...(useRealExecution && n8nWebhookUrl && {
-          n8nConfig: {
-            webhookUrl: n8nWebhookUrl,
-          }
-        })
-      };
-      onStartAudit({ config, n8nData: parsedN8nData, n8nJson: originalN8nJson });
+    
+    if (!isWorkflowValid || criteria.length === 0) {
+      alert('Por favor completa el workflow y los criterios de auditoría.');
+      return;
     }
+
+    // ⚠️ WEBHOOK OBLIGATORIO para auditoría real
+    if (useRealExecution && !n8nWebhookUrl) {
+      alert(
+        '❌ WEBHOOK REQUERIDO\n\n' +
+        'Para realizar una auditoría REAL, necesitás proporcionar el webhook de n8n.\n\n' +
+        'Sin el webhook, los resultados serían INVENTADOS por IA y la auditoría sería INÚTIL.\n\n' +
+        '💡 Tip: Obtené el webhook desde tu workflow de n8n (nodo Webhook).'
+      );
+      return;
+    }
+
+    // ⚠️ Advertencia para modo DEMO (sin webhook)
+    if (!useRealExecution) {
+      const proceed = confirm(
+        '⚠️ ADVERTENCIA: Modo DEMO\n\n' +
+        'Sin usar el webhook de n8n real, la auditoría usará datos SIMULADOS/INVENTADOS por IA.\n\n' +
+        '❌ Los resultados NO reflejarán el comportamiento real de tu workflow.\n' +
+        '❌ La auditoría será POCO CONFIABLE.\n' +
+        '✅ Para auditoría REAL: Activa "Usar ejecución real en n8n" y proporciona el webhook.\n\n' +
+        '¿Continuar con modo DEMO de todos modos?'
+      );
+      if (!proceed) return;
+    }
+
+    const config: AuditConfig = {
+      workflow,
+      criteria,
+      testCaseCount,
+      useRealExecution,
+      ...(useRealExecution && n8nWebhookUrl && {
+        n8nConfig: {
+          webhookUrl: n8nWebhookUrl,
+        }
+      })
+    };
+    onStartAudit({ config, n8nData: parsedN8nData, n8nJson: originalN8nJson });
   };
 
   return (
@@ -207,9 +235,18 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
 
           {useRealExecution && (
             <div className="pl-6 border-l-2 border-primary-500 space-y-4 animate-fadeIn">
+              <div className="bg-green-50 dark:bg-green-900/20 border border-green-500 rounded-lg p-4 mb-4">
+                <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">
+                  ✅ Modo Auditoría REAL activado
+                </h4>
+                <p className="text-sm text-green-700 dark:text-green-400">
+                  El sistema ejecutará los test cases en tu n8n real y auditará los resultados verdaderos.
+                </p>
+              </div>
+              
               <div>
                 <label htmlFor="n8n-webhook-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  {t('n8nWebhookUrl')} <span className="text-red-500">*</span>
+                  {t('n8nWebhookUrl')} <span className="text-red-500">* OBLIGATORIO</span>
                 </label>
                 <input
                   id="n8n-webhook-url"
@@ -224,6 +261,25 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
                   💡 {t('n8nWebhookHint')}
                 </p>
               </div>
+            </div>
+          )}
+          
+          {!useRealExecution && (
+            <div className="mt-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-500 rounded-lg p-4">
+              <h4 className="font-semibold text-yellow-800 dark:text-yellow-300 mb-2 flex items-center gap-2">
+                ⚠️ Advertencia: Modo DEMO/Simulación
+              </h4>
+              <p className="text-sm text-yellow-700 dark:text-yellow-400 mb-2">
+                Sin el webhook de n8n, el sistema usará <strong>datos INVENTADOS por IA</strong> para simular la ejecución.
+              </p>
+              <ul className="text-sm text-yellow-700 dark:text-yellow-400 space-y-1 list-disc list-inside">
+                <li>Los resultados <strong>NO</strong> reflejarán el comportamiento real</li>
+                <li>La auditoría será <strong>POCO CONFIABLE</strong></li>
+                <li>Solo sirve para <strong>demostración</strong> de la interfaz</li>
+              </ul>
+              <p className="text-sm text-yellow-800 dark:text-yellow-300 mt-3 font-semibold">
+                ✅ Para una auditoría real: Activa "Usar ejecución real en n8n" y proporciona el webhook.
+              </p>
             </div>
           )}
         </div>
