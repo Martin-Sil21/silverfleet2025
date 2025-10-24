@@ -1,8 +1,17 @@
+
 import React, { useMemo, useState } from 'react';
-import type { AuditResult, ImprovementData } from '../types';
+import type { AuditResult, ImprovementData, N8nAgentConfig } from '../types';
 import Card from './Card';
 import { ArrowRightIcon } from './icons/ArrowRightIcon';
 import { ClipboardIcon } from './icons/ClipboardIcon';
+import { useTranslation } from '../hooks/useTranslation';
+
+const DownloadIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+  </svg>
+);
+
 
 const ScoreComparison: React.FC<{ oldScore: number, newScore: number }> = ({ oldScore, newScore }) => {
     const change = newScore - oldScore;
@@ -20,36 +29,57 @@ const ScoreComparison: React.FC<{ oldScore: number, newScore: number }> = ({ old
     );
 };
 
-const PromptDiff: React.FC<{ oldPrompt: string, newPrompt: string, onCopy: () => void, copyText: string }> = ({ oldPrompt, newPrompt, onCopy, copyText }) => (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div>
-            <h4 className="font-semibold mb-2 text-gray-800 dark:text-gray-200">Original Prompt (Agent 1)</h4>
-            <textarea readOnly value={oldPrompt} className="w-full h-48 p-3 bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm" />
-        </div>
-        <div>
-            <div className="flex justify-between items-center mb-2">
-                <h4 className="font-semibold text-gray-800 dark:text-gray-200">Improved Prompt (Agent 1)</h4>
-                <button onClick={onCopy} className="flex items-center gap-1 text-sm text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200">
+const PromptComparisonCard: React.FC<{ index: number, oldPrompt: string, newPrompt: string, agentName?: string }> = ({ index, oldPrompt, newPrompt, agentName }) => {
+    const { t } = useTranslation();
+    const [copyText, setCopyText] = useState(t('copyNewPrompt'));
+
+    const handleCopy = () => {
+        navigator.clipboard.writeText(newPrompt);
+        setCopyText(t('copied'));
+        setTimeout(() => setCopyText(t('copyNewPrompt')), 2000);
+    };
+    
+    const hasChanged = oldPrompt !== newPrompt;
+    
+    const agentTitle = agentName ? t('agentNameLabel', { index: index + 1, name: agentName }) : t('agentLabel', { index: index + 1 });
+
+    return (
+        <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+            <div className="flex justify-between items-center mb-3">
+                <h4 className="font-bold text-lg text-gray-800 dark:text-white">
+                    {agentTitle}
+                </h4>
+                 <button onClick={handleCopy} className="flex items-center gap-1 text-sm text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200">
                     <ClipboardIcon className="w-4 h-4" />
                     {copyText}
                 </button>
             </div>
-            <textarea readOnly value={newPrompt} className="w-full h-48 p-3 bg-green-50 dark:bg-green-900/50 border border-green-300 dark:border-green-700 rounded-lg text-sm" />
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <h5 className="font-semibold mb-1 text-sm text-gray-600 dark:text-gray-400">{t('originalPrompt')}</h5>
+                    <textarea readOnly value={oldPrompt} className="w-full h-40 p-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md text-xs" />
+                </div>
+                <div>
+                    <h5 className="font-semibold mb-1 text-sm text-gray-600 dark:text-gray-400">{t('improvedPrompt')}</h5>
+                    <textarea readOnly value={newPrompt} className={`w-full h-40 p-2 border rounded-md text-xs ${hasChanged ? 'bg-green-50 dark:bg-green-900/50 border-green-300 dark:border-green-700' : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600'}`} />
+                </div>
+            </div>
         </div>
-    </div>
-);
+    )
+};
+
 
 interface ImprovementReportProps {
     originalResults: AuditResult[];
     improvementData: ImprovementData;
     onReset: () => void;
-    originalPrompt: string;
+    originalPrompts: string[];
+    n8nData: N8nAgentConfig[] | null;
 }
 
-const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, improvementData, onReset, originalPrompt }) => {
-    
-    const { improvedPrompt, explanation, newResults } = improvementData;
-    const [copyText, setCopyText] = useState('Copy');
+const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, improvementData, onReset, originalPrompts, n8nData }) => {
+    const { t } = useTranslation();
+    const { improvedPrompts, explanation, newResults } = improvementData;
 
     const overallScores = useMemo(() => {
         const oldTotal = originalResults.reduce((sum, r) => sum + r.analysis.overallScore, 0);
@@ -60,10 +90,28 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
         };
     }, [originalResults, newResults]);
 
-    const handleCopy = () => {
-        navigator.clipboard.writeText(improvedPrompt);
-        setCopyText('Copied!');
-        setTimeout(() => setCopyText('Copy'), 2000);
+    const handleDownload = () => {
+        if (!n8nData) return;
+        
+        const dataToDownload = {
+            agentsToUpdate: n8nData.map((agent, index) => ({
+                nodeName: agent.name,
+                nodeId: agent.id,
+                originalPrompt: originalPrompts[index],
+                improvedPrompt: improvedPrompts[index],
+            })),
+        };
+
+        const jsonString = JSON.stringify(dataToDownload, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'n8n_prompt_updates.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     };
 
     return (
@@ -71,28 +119,49 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
             <Card>
                 <div className="flex flex-col md:flex-row items-center justify-between gap-6">
                     <div>
-                        <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Improvement Report</h2>
-                        <p className="text-gray-600 dark:text-gray-400 mt-1">Comparison of the agent's performance before and after improvements.</p>
+                        <h2 className="text-3xl font-bold text-gray-800 dark:text-white">{t('improvementReportTitle')}</h2>
+                        <p className="text-gray-600 dark:text-gray-400 mt-1">{t('improvementReportDescription')}</p>
                     </div>
                     <div className="text-center">
-                        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Overall Average Score</p>
+                        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{t('overallAverageScore')}</p>
                         <ScoreComparison oldScore={overallScores.old} newScore={overallScores.new} />
                     </div>
                 </div>
             </Card>
 
             <Card>
-                <h3 className="text-xl font-semibold mb-3 text-gray-800 dark:text-white">Summary of Changes</h3>
+                <h3 className="text-xl font-semibold mb-3 text-gray-800 dark:text-white">{t('summaryOfChanges')}</h3>
                 <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{explanation}</p>
             </Card>
 
             <Card>
-                <h3 className="text-xl font-semibold mb-4 text-gray-800 dark:text-white">System Prompt Comparison</h3>
-                <PromptDiff oldPrompt={originalPrompt} newPrompt={improvedPrompt} onCopy={handleCopy} copyText={copyText}/>
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 mb-4">
+                    <h3 className="text-xl font-semibold text-gray-800 dark:text-white">{t('promptComparisonTitle')}</h3>
+                    {n8nData && (
+                        <button 
+                            onClick={handleDownload}
+                            className="flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition"
+                        >
+                            <DownloadIcon className="w-5 h-5"/>
+                            {t('downloadN8nJson')}
+                        </button>
+                    )}
+                </div>
+                <div className="space-y-4">
+                    {originalPrompts.map((prompt, index) => (
+                        <PromptComparisonCard 
+                            key={index}
+                            index={index}
+                            oldPrompt={prompt}
+                            newPrompt={improvedPrompts[index]}
+                            agentName={n8nData?.[index]?.name}
+                        />
+                    ))}
+                </div>
             </Card>
             
             <Card>
-                <h3 className="text-xl font-semibold mb-4 text-gray-800 dark:text-white">Detailed Test Case Comparison</h3>
+                <h3 className="text-xl font-semibold mb-4 text-gray-800 dark:text-white">{t('detailedTestComparison')}</h3>
                 <div className="space-y-4">
                     {originalResults.map((origResult) => {
                         const newResult = newResults.find(nr => nr.id === origResult.id);
@@ -113,7 +182,7 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
                     onClick={onReset}
                     className="py-3 px-6 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105"
                 >
-                    Run New Audit
+                    {t('runNewAudit')}
                 </button>
             </div>
         </div>

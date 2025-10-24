@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useMemo } from 'react';
 import type { AuditConfig, N8nAgentConfig } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';
 import { XCircleIcon } from './icons/XCircleIcon';
@@ -6,23 +7,27 @@ import Card from './Card';
 import { parseN8nWorkflow } from '../services/n8nParser';
 import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
+import { useTranslation } from '../hooks/useTranslation';
 
 interface AgentConfigProps {
-  onStartAudit: (config: AuditConfig) => void;
+  onStartAudit: (data: { config: AuditConfig, n8nData: N8nAgentConfig[] | null }) => void;
 }
 
-const DEFAULT_CRITERIA = [
-  "No Hallucinations",
-  "Maintains Context",
-  "Human-like Tone",
-  "Follows Instructions",
-];
-
 const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
+  const { t } = useTranslation();
+  
+  const DEFAULT_CRITERIA = useMemo(() => [
+    t('defaultCriteria1'),
+    t('defaultCriteria2'),
+    t('defaultCriteria3'),
+    t('defaultCriteria4'),
+  ], [t]);
+
   const [systemPrompts, setSystemPrompts] = useState<string[]>(['You are a helpful and friendly assistant.']);
   const [criteria, setCriteria] = useState<string[]>(DEFAULT_CRITERIA);
   const [newCriterion, setNewCriterion] = useState('');
   const [testCaseCount, setTestCaseCount] = useState(5);
+  const [n8nAgents, setN8nAgents] = useState<N8nAgentConfig[] | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -30,6 +35,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     if (!file) return;
 
     setFileError(null);
+    setN8nAgents(null);
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -39,6 +45,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         
         const agents = parseN8nWorkflow(text);
         setSystemPrompts(agents.map(a => a.systemPrompt));
+        setN8nAgents(agents);
       } catch (error) {
         const message = error instanceof Error ? error.message : "An unknown error occurred during parsing.";
         setFileError(message);
@@ -62,11 +69,13 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
   
     const handleAddAgent = () => {
     setSystemPrompts([...systemPrompts, 'New agent prompt...']);
+    setN8nAgents(null);
   };
 
   const handleRemoveAgent = (index: number) => {
     if (systemPrompts.length > 1) {
       setSystemPrompts(systemPrompts.filter((_, i) => i !== index));
+      setN8nAgents(null);
     }
   };
 
@@ -74,30 +83,32 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     const newPrompts = [...systemPrompts];
     newPrompts[index] = value;
     setSystemPrompts(newPrompts);
+    setN8nAgents(null);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (systemPrompts.every(p => p.trim()) && criteria.length > 0) {
-      onStartAudit({ systemPrompts, criteria, testCaseCount });
+      const config = { systemPrompts, criteria, testCaseCount };
+      onStartAudit({ config, n8nData: n8nAgents });
     }
   };
 
   return (
     <>
       <Card className="mb-8">
-         <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">Import from n8n Workflow</h2>
+         <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('importN8nTitle')}</h2>
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Upload an n8n JSON workflow to automatically extract and test your AI agents in their execution order.
+          {t('importN8nDescription')}
         </p>
 
         <div className="relative border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center hover:border-primary-500 dark:hover:border-primary-400 transition-colors">
           <UploadIcon className="mx-auto h-12 w-12 text-gray-400" />
           <label htmlFor="file-upload" className="mt-2 block text-sm font-semibold text-primary-600 hover:text-primary-500 cursor-pointer">
-            <span>Upload a file</span>
+            <span>{t('uploadFile')}</span>
             <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".json" onChange={handleFileChange} />
           </label>
-          <p className="text-xs text-gray-500 dark:text-gray-400">JSON up to 10MB</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">{t('uploadHint')}</p>
         </div>
 
         {fileError && (
@@ -109,11 +120,11 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     
       <Card>
         <form onSubmit={handleSubmit} className="space-y-8">
-          <h2 className="text-2xl font-semibold text-gray-800 dark:text-white text-center">Audit Configuration</h2>
+          <h2 className="text-2xl font-semibold text-gray-800 dark:text-white text-center">{t('configTitle')}</h2>
           
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              1. Agent System Prompts (in execution order)
+              {t('promptsLabel')}
             </label>
             <div className="space-y-4">
               {systemPrompts.map((prompt, index) => (
@@ -124,7 +135,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
                     className="flex-grow p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
                     value={prompt}
                     onChange={(e) => handlePromptChange(index, e.target.value)}
-                    placeholder={`e.g., You are Agent #${index + 1}...`}
+                    placeholder={t('promptPlaceholder', { index: index + 1 })}
                   />
                   <button type="button" onClick={() => handleRemoveAgent(index)} 
                     className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
@@ -137,13 +148,13 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
             </div>
             <button type="button" onClick={handleAddAgent} className="mt-4 text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200 flex items-center gap-1">
                 <PlusCircleIcon className="w-5 h-5"/>
-                Add Agent to Chain
+                {t('addAgent')}
             </button>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              2. Audit Criteria
+              {t('criteriaLabel')}
             </label>
             <div className="flex flex-wrap gap-2 mb-3">
               {criteria.map((c) => (
@@ -162,7 +173,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
                 value={newCriterion}
                 onChange={(e) => setNewCriterion(e.target.value)}
                 onKeyDown={(e) => {if(e.key === 'Enter') { e.preventDefault(); handleAddCriterion();}}}
-                placeholder="Add custom criterion..."
+                placeholder={t('addCriterionPlaceholder')}
               />
               <button type="button" onClick={handleAddCriterion} className="p-3 bg-primary-100 dark:bg-primary-900 text-primary-600 dark:text-primary-300 rounded-lg hover:bg-primary-200 dark:hover:bg-primary-800 transition">
                 <PlusCircleIcon className="w-6 h-6" />
@@ -172,7 +183,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
 
           <div>
             <label htmlFor="test-case-count" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              3. Number of Test Cases to Generate ({testCaseCount})
+              {t('testCaseCountLabel', { count: testCaseCount })}
             </label>
             <input
               id="test-case-count"
@@ -190,7 +201,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
             <button type="submit" className="w-full py-3 px-4 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
               disabled={systemPrompts.some(p => !p.trim()) || criteria.length === 0}
             >
-              Generate Test Cases & Run Audit
+              {t('startAuditButton')}
             </button>
           </div>
         </form>

@@ -1,11 +1,21 @@
 
 import { GoogleGenAI, Type, Chat } from "@google/genai";
-import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult } from './types';
+import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData } from './types';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 const API_CALL_DELAY_MS = 2500; // 2.5 second delay between calls to avoid rate limiting.
 
-const generateTestCases = async (config: AuditConfig): Promise<TestCase[]> => {
+interface ChainedTestExecutionResult {
+    conversation: ConversationTurn[];
+    fullTrace: string;
+}
+
+const getLanguageInstruction = (language: string): string => {
+    const langName = language === 'es' ? 'Spanish' : 'English';
+    return `\n\nCRITICAL: You must provide your entire response, including all text and justifications, exclusively in ${langName}. Do not use any other language.`;
+}
+
+const generateTestCases = async (config: AuditConfig, language: string): Promise<TestCase[]> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const { systemPrompts, criteria, testCaseCount } = config;
 
@@ -21,6 +31,7 @@ const generateTestCases = async (config: AuditConfig): Promise<TestCase[]> => {
     Audit Criteria: ${criteria.join(', ')}
 
     Return the result as a JSON array.
+    ${getLanguageInstruction(language)}
     `;
 
     const response = await ai.models.generateContent({
@@ -56,11 +67,14 @@ const generateTestCases = async (config: AuditConfig): Promise<TestCase[]> => {
     }
 };
 
-const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): Promise<ConversationTurn[]> => {
+const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): Promise<ChainedTestExecutionResult> => {
     const conversation: ConversationTurn[] = [];
+    let fullTrace = `Test Case: "${testCase.title}"\nScenario: ${testCase.scenario}\n\n`;
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     for (const [index, userPrompt] of testCase.prompts.entries()) {
+        fullTrace += `--- CONVERSATION TURN ${index + 1} ---\n`;
+        fullTrace += `USER: ${userPrompt}\n`;
         // Delay between each conversational turn from the user.
         if (index > 0) {
             await delay(API_CALL_DELAY_MS);
@@ -71,6 +85,7 @@ const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): 
 
         // Process the input through the chain of agents
         for (const [agentIndex, systemPrompt] of systemPrompts.entries()) {
+             fullTrace += `AGENT ${agentIndex + 1} (Input): ${currentInput.substring(0, 200)}...\n`;
              // Add a delay BETWEEN each agent call in the chain to avoid rate limiting
              if (agentIndex > 0) {
                 await delay(API_CALL_DELAY_MS);
@@ -82,32 +97,36 @@ const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): 
              });
              const result = await chat.sendMessage({ message: currentInput });
              currentInput = result.text;
+             fullTrace += `AGENT ${agentIndex + 1} (Output): ${currentInput}\n`;
         }
 
         conversation.push({ author: 'agent', message: currentInput });
+        fullTrace += `--------------------------------\n\n`;
     }
-    return conversation;
+    return { conversation, fullTrace };
 };
 
 
-const analyzeConversation = async (systemPrompts: string[], criteria: string[], conversation: ConversationTurn[]): Promise<Analysis> => {
+const analyzeConversation = async (systemPrompts: string[], criteria: string[], fullTrace: string, language: string): Promise<Analysis> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const prompt = `
-    As an expert AI auditor, analyze the following conversation which was handled by a chain of AI agents.
+    As an expert AI auditor, analyze the following execution trace of a multi-agent AI chain.
     
     AI Agent Chain System Prompts (in order):
     ${systemPrompts.map((p, i) => `Agent ${i + 1}: "${p}"`).join('\n')}
     
     Audit Criteria: ${criteria.join(', ')}
     
-    Conversation Transcript (User queries and FINAL output from the last agent):
-    ${conversation.map(turn => `${turn.author.toUpperCase()}: ${turn.message}`).join('\n')}
+    Full Execution Trace (showing user inputs and all intermediate agent outputs):
+    ${fullTrace}
     
     Provide a detailed analysis based on the criteria. For each criterion, give a score from 1 to 10 and a concise justification. 
-    Also, provide an overall summary of the agent's performance and a final overall score (1-10).
+    Also, provide an overall summary of the agent chain's performance and a final overall score (1-10).
+    Your analysis should consider the entire chain's behavior, not just the final output.
     
     The output must be in JSON format.
+    ${getLanguageInstruction(language)}
     `;
 
     const response = await ai.models.generateContent({
@@ -147,7 +166,7 @@ const analyzeConversation = async (systemPrompts: string[], criteria: string[], 
     }
 };
 
-const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[]): Promise<{ improvedPrompt: string, explanation: string }> => {
+const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[], language: string): Promise<{ improvedPrompts: string[], explanation: string }> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const analysisSummary = results.map(r => ({
@@ -158,9 +177,9 @@ const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[]):
     })).filter(r => r.low_scores).map(r => `Test: "${r.test}" (Score: ${r.score})\nSummary: ${r.summary}\nWeaknesses:\n${r.low_scores}`).join('\n\n---\n\n');
 
     const prompt = `
-    As an expert AI agent designer, your task is to improve an AI agent's primary system prompt based on an audit report of a multi-agent chain.
-    You will be given the original system prompts for the entire chain, the audit criteria, and a summary of the audit's findings.
-    Your goal is to improve the FIRST system prompt in the chain, as it is the primary agent interacting with the user.
+    As an expert AI agent designer, your task is to improve a chain of AI agent system prompts based on an audit report.
+    You will be given the original system prompts, the audit criteria, and a summary of the audit's findings.
+    Your goal is to improve the system prompts to enhance the overall performance of the agent chain.
 
     Original System Prompts:
     ${config.systemPrompts.map((p, i) => `Agent ${i + 1}: "${p}"`).join('\n')}
@@ -169,15 +188,18 @@ const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[]):
     ${config.criteria.join(', ')}
 
     Audit Analysis Summary (focusing on weaknesses):
-    ${analysisSummary || "The agent performed well overall, but please review the prompt for any potential areas of improvement in clarity, safety, or conciseness."}
+    ${analysisSummary || "The agent performed well overall, but please review the prompts for any potential areas of improvement in clarity, safety, or conciseness."}
 
     Instructions:
     1.  Carefully analyze the audit feedback in the context of the entire agent chain.
-    2.  Rewrite ONLY the first system prompt (Agent 1) to address the identified weaknesses. The goal is to improve the initial input processing to benefit the entire chain.
-    3.  Do NOT change the core persona or purpose of the agent. The goal is refinement.
-    4.  Provide a brief explanation of the key changes you made and why they will lead to better performance for the whole system.
+    2.  Rewrite any of the system prompts that need improvement to address the identified weaknesses.
+    3.  If a prompt is already optimal, return the original version.
+    4.  The number of prompts returned must exactly match the number of original prompts.
+    5.  Do NOT change the core persona or purpose of the agents. The goal is refinement.
+    6.  Provide a brief explanation of the key changes you made and why they will lead to better performance for the whole system.
 
     Return your response as a single JSON object.
+    ${getLanguageInstruction(language)}
     `;
 
     const response = await ai.models.generateContent({
@@ -188,38 +210,46 @@ const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[]):
             responseSchema: {
                 type: Type.OBJECT,
                 properties: {
-                    improvedPrompt: { type: Type.STRING },
+                    improvedPrompts: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING }
+                    },
                     explanation: { type: Type.STRING },
                 },
-                required: ['improvedPrompt', 'explanation'],
+                required: ['improvedPrompts', 'explanation'],
             },
         },
     });
 
     try {
         const jsonText = response.text.trim();
-        return JSON.parse(jsonText);
+        const parsed = JSON.parse(jsonText);
+        if (!Array.isArray(parsed.improvedPrompts) || parsed.improvedPrompts.length !== config.systemPrompts.length) {
+            throw new Error("Model returned an incorrect number of improved prompts.");
+        }
+        return parsed;
     } catch (e) {
-        console.error("Failed to parse improvement JSON:", response.text);
-        throw new Error("Could not generate improvements. The model returned malformed JSON.");
+        console.error("Failed to parse improvement JSON:", response.text, e);
+        throw new Error("Could not generate improvements. The model returned malformed JSON or an incorrect structure.");
     }
 };
 
 export const runAuditOnTestCases = async (
     config: AuditConfig,
     testCases: TestCase[],
-    setProgress: (message: string) => void
+    setProgress: (message: string) => void,
+    language: string
 ): Promise<AuditResult[]> => {
     const results: AuditResult[] = [];
     for (let i = 0; i < testCases.length; i++) {
         const testCase = testCases[i];
         setProgress(`Running test case ${i + 1}/${testCases.length}: "${testCase.title}"`);
-        const conversation = await runChainedTestCase(config.systemPrompts, testCase);
+        const { conversation, fullTrace } = await runChainedTestCase(config.systemPrompts, testCase);
         
         await delay(API_CALL_DELAY_MS); // Add delay between conversation and analysis
         
         setProgress(`Analyzing results for test case ${i + 1}/${testCases.length}...`);
-        const analysis = await analyzeConversation(config.systemPrompts, config.criteria, conversation);
+        const analysis = await analyzeConversation(config.systemPrompts, config.criteria, fullTrace, language);
 
         results.push({
             id: testCase.id,
@@ -238,17 +268,18 @@ export const runAuditOnTestCases = async (
 export const runFullAudit = async (
     config: AuditConfig,
     setProgress: (message: string) => void,
-    onComplete: (results: AuditResult[]) => void
+    onComplete: (results: AuditResult[]) => void,
+    language: string
 ) => {
     setProgress(`Generating ${config.testCaseCount} test cases...`);
-    const testCases = await generateTestCases(config);
+    const testCases = await generateTestCases(config, language);
     if (!testCases || testCases.length === 0) {
         throw new Error("Failed to generate test cases.");
     }
     
     await delay(API_CALL_DELAY_MS); // Add delay after generating test cases
 
-    const results = await runAuditOnTestCases(config, testCases, setProgress);
+    const results = await runAuditOnTestCases(config, testCases, setProgress, language);
 
     setProgress('Audit complete!');
     onComplete(results);
@@ -258,26 +289,24 @@ export const runImprovementCycle = async (
     config: AuditConfig,
     originalResults: AuditResult[],
     setProgress: (message: string) => void,
-    onComplete: (improvementData: { improvedPrompt: string, explanation: string, newResults: AuditResult[] }) => void
+    onComplete: (improvementData: ImprovementData) => void,
+    language: string
 ) => {
     setProgress("Analyzing results and generating improvements...");
-    const { improvedPrompt, explanation } = await improveSystemPrompt(config, originalResults);
+    const { improvedPrompts, explanation } = await improveSystemPrompt(config, originalResults, language);
     
     await delay(API_CALL_DELAY_MS); // Add delay after generating improvements
     
-    const newSystemPrompts = [...config.systemPrompts];
-    newSystemPrompts[0] = improvedPrompt;
-
     const newConfig: AuditConfig = {
         ...config,
-        systemPrompts: newSystemPrompts,
+        systemPrompts: improvedPrompts,
     };
     
     const originalTestCases = originalResults.map(r => r.testCase);
 
     setProgress("Re-running audit on improved agent...");
-    const newResults = await runAuditOnTestCases(newConfig, originalTestCases, setProgress);
+    const newResults = await runAuditOnTestCases(newConfig, originalTestCases, setProgress, language);
 
     setProgress("Improvement cycle complete!");
-    onComplete({ improvedPrompt, explanation, newResults });
+    onComplete({ improvedPrompts, explanation, newResults });
 };
