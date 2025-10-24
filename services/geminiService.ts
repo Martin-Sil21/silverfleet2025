@@ -25,7 +25,7 @@ const formatWorkflowForPrompt = (workflow: WorkflowNode[]): string => {
 };
 
 const generateTestCases = async (config: AuditConfig, language: string): Promise<TestCase[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
     const { workflow, criteria, testCaseCount } = config;
 
     const prompt = `
@@ -79,7 +79,7 @@ const generateTestCases = async (config: AuditConfig, language: string): Promise
 const runChainedTestCase = async (workflow: WorkflowNode[], testCase: TestCase): Promise<ChainedTestExecutionResult> => {
     const conversation: ConversationTurn[] = [];
     let fullTrace = `Test Case: "${testCase.title}"\nScenario: ${testCase.scenario}\n\n`;
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
     
     const chatSessions: Map<string, Chat> = new Map();
 
@@ -127,7 +127,7 @@ const runChainedTestCase = async (workflow: WorkflowNode[], testCase: TestCase):
 
 
 const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[], fullTrace: string, language: string): Promise<Analysis> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
     const prompt = `
     As an expert AI auditor, analyze the following execution trace of a multi-step AI workflow.
@@ -186,7 +186,7 @@ const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[],
 };
 
 const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[], language: string): Promise<{ improvedWorkflow: WorkflowNode[], explanation: string }> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
     const analysisSummary = results.map(r => ({
         test: r.testCase.title,
