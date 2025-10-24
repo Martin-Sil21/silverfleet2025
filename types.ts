@@ -23,18 +23,10 @@ export interface ToolNode {
 
 export type WorkflowNode = AgentNode | ToolNode;
 
-export interface N8nConfig {
-  baseUrl: string; // e.g., "https://your-n8n.com"
-  apiKey: string;
-  workflowId?: string; // Optional: ID del workflow a auditar
-}
-
 export interface AuditConfig {
   workflow: WorkflowNode[];
   criteria: string[];
   testCaseCount: number;
-  n8nConfig?: N8nConfig; // Configuración para ejecuciones reales en n8n
-  useRealExecution?: boolean; // Si true, ejecuta en n8n real. Si false, usa simulación IA
 }
 
 export interface TestCase {
@@ -84,7 +76,6 @@ export interface ImprovementData {
   improvedWorkflow: WorkflowNode[];
   explanation: string;
   newResults: AuditResult[];
-  improvedN8nJson?: any; // JSON completo de n8n mejorado para descargar
 }
 
 // Data structure returned directly from the n8n parser

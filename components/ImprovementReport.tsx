@@ -96,40 +96,29 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
     const handleDownload = () => {
         if (!n8nData) return;
         
-        let dataToDownload: any;
-        let filename: string;
-        
-        // Si tenemos el JSON completo mejorado, descargarlo
-        if (improvementData.improvedN8nJson) {
-            dataToDownload = improvementData.improvedN8nJson;
-            filename = `${improvementData.improvedN8nJson.name || 'workflow'}.json`;
-        } else {
-            // Fallback: descargar solo los cambios de prompts
-            dataToDownload = {
-                agentsToUpdate: improvedWorkflow
-                    .filter(node => node.type === 'agent')
-                    .map(improvedNode => {
-                        const originalNode = originalWorkflow.find(n => n.id === improvedNode.id);
-                        if (!originalNode || originalNode.type !== 'agent' || improvedNode.type !== 'agent') return null;
-                        
-                        return {
-                            nodeName: originalNode.name,
-                            nodeId: originalNode.id,
-                            originalPrompt: originalNode.systemPrompt,
-                            improvedPrompt: improvedNode.systemPrompt,
-                        }
-                    })
-                    .filter(Boolean),
-            };
-            filename = 'n8n_prompt_updates.json';
-        }
+        const dataToDownload = {
+            agentsToUpdate: improvedWorkflow
+                .filter(node => node.type === 'agent')
+                .map(improvedNode => {
+                    const originalNode = originalWorkflow.find(n => n.id === improvedNode.id);
+                    if (!originalNode || originalNode.type !== 'agent' || improvedNode.type !== 'agent') return null;
+                    
+                    return {
+                        nodeName: originalNode.name,
+                        nodeId: originalNode.id,
+                        originalPrompt: originalNode.systemPrompt,
+                        improvedPrompt: improvedNode.systemPrompt,
+                    }
+                })
+                .filter(Boolean),
+        };
 
         const jsonString = JSON.stringify(dataToDownload, null, 2);
         const blob = new Blob([jsonString], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename;
+        a.download = 'n8n_prompt_updates.json';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);

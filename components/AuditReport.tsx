@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { AuditResult, ConversationTurn, CriterionAnalysis, AuditConfig } from '../types';
 import Card from './Card';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
@@ -10,7 +10,6 @@ import VisualTracePlayer from './VisualTracePlayer';
 interface AuditReportProps {
   results: AuditResult[];
   onReset: () => void;
-  onStartImprovement: () => void;
   config: AuditConfig;
 }
 
@@ -113,13 +112,23 @@ const ReportCard: React.FC<{ result: AuditResult, workflow: AuditConfig['workflo
   );
 };
 
-const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImprovement, config }) => {
+const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config }) => {
   const { t } = useTranslation();
   const overallAverageScore = useMemo(() => {
     if (results.length === 0) return 0;
     const total = results.reduce((sum, r) => sum + r.analysis.overallScore, 0);
     return parseFloat((total / results.length).toFixed(1));
   }, [results]);
+
+  const [countdown, setCountdown] = useState(5);
+
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const timer = setTimeout(() => {
+      setCountdown(prev => prev - 1);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [countdown]);
 
   return (
     <div>
@@ -147,12 +156,11 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImpr
         >
           {t('runNewAudit')}
         </button>
-        <button
-          onClick={onStartImprovement}
-          className="py-3 px-6 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105"
-        >
-          {t('suggestImprovements')}
-        </button>
+        <div className="py-3 px-6 bg-primary-100 dark:bg-primary-900/50 text-primary-700 dark:text-primary-300 font-semibold rounded-lg shadow-md">
+          {countdown > 0 
+              ? t('startingImprovementCycle', { seconds: countdown }) 
+              : t('generatingImprovements')}
+        </div>
       </div>
     </div>
   );
