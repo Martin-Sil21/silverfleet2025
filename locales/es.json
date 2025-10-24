@@ -24,6 +24,8 @@
   "overallAverageScore": "Puntuación Media General",
   "showLog": "Mostrar Registro de Conversación",
   "hideLog": "Ocultar Registro de Conversación",
+  "showVisualTrace": "Mostrar Traza Visual",
+  "hideVisualTrace": "Ocultar Traza Visual",
   "criteriaBreakdown": "Desglose de Criterios",
   "runNewAudit": "Ejecutar Nueva Auditoría",
   "suggestImprovements": "Sugerir y Probar Mejoras",
@@ -42,10 +44,15 @@
   "agentNodeTitle": "Paso de Agente IA: {name}",
   "toolNodeTitle": "Paso de Herramienta: {name}",
   "toolNodeType": "Tipo de Nodo: {type}",
-  "toolSimulationDescription": "Proporciona una salida simulada para esta herramienta. Este texto se pasará como contexto al siguiente paso en el flujo de trabajo.",
+  "toolSimulationAuto": "La salida de esta herramienta será simulada automáticamente por la IA durante la auditoría, basándose en su tipo y el contexto actual.",
   "toolOutputPlaceholder": "p. ej., Pega un JSON de muestra o describe los datos que esta herramienta proporciona...",
   "defaultCriteria1": "Sin Alucinaciones",
   "defaultCriteria2": "Mantiene el Contexto",
   "defaultCriteria3": "Tono Humano",
-  "defaultCriteria4": "Sigue Instrucciones"
+  "defaultCriteria4": "Sigue Instrucciones",
+  "traceStep": "Paso {step} de {total}",
+  "inputFor": "Entrada Para",
+  "outputFrom": "Salida De",
+  "suggestCriteria": "Sugerir Criterios",
+  "suggestingCriteria": "Sugiriendo..."
 }

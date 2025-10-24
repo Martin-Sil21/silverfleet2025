@@ -7,13 +7,16 @@ import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
 import { useTranslation } from '../hooks/useTranslation';
 import { XCircleIcon } from './icons/XCircleIcon';
+import { SparklesIcon } from './icons/SparklesIcon';
+import { suggestAuditCriteria } from '../services/geminiService';
+import Loader from './Loader';
 
 interface AgentConfigProps {
   onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => void;
 }
 
 const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   
   const DEFAULT_CRITERIA = useMemo(() => [
     t('defaultCriteria1'),
@@ -33,6 +36,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
   const [testCaseCount, setTestCaseCount] = useState(5);
   const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nNode[] | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [isSuggestingCriteria, setIsSuggestingCriteria] = useState(false);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -62,7 +66,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
             id: node.id,
             name: node.name,
             nodeType: node.type,
-            simulatedOutput: '',
           };
         });
         setWorkflow(newWorkflow);
@@ -111,11 +114,23 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     const node = newWorkflow[index];
     if (node.type === 'agent') {
       node.systemPrompt = value;
-    } else {
-      node.simulatedOutput = value;
     }
     setWorkflow(newWorkflow);
     setParsedN8nData(null);
+  };
+
+  const handleSuggestCriteria = async () => {
+    setIsSuggestingCriteria(true);
+    try {
+      const suggested = await suggestAuditCriteria(workflow, language);
+      setCriteria(suggested);
+    } catch(error) {
+      // Basic error handling for the user
+      const message = error instanceof Error ? error.message : "Could not suggest criteria.";
+      alert(message);
+    } finally {
+      setIsSuggestingCriteria(false);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -187,14 +202,9 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
                         <div className="flex-grow">
                             <h3 className="font-semibold text-gray-800 dark:text-white">{t('toolNodeTitle', { name: node.name })}</h3>
                              <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t('toolNodeType', { type: node.nodeType })}</p>
-                             <p className="text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">{t('toolSimulationDescription')}</p>
-                             <textarea
-                               rows={3}
-                               className="w-full mt-2 p-3 bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-700 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                               value={node.simulatedOutput}
-                               onChange={(e) => handleNodeChange(index, e.target.value)}
-                               placeholder={t('toolOutputPlaceholder')}
-                             />
+                             <p className="text-sm font-medium text-blue-600 dark:text-blue-300 p-3 bg-blue-50 dark:bg-blue-900/50 border-l-4 border-blue-500 rounded-r-lg">
+                                {t('toolSimulationAuto')}
+                             </p>
                         </div>
                         <button type="button" onClick={() => handleRemoveNode(index)} 
                           className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
@@ -214,9 +224,15 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           </div>
 
           <div>
-            <label className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-2">
-              {t('criteriaLabel')}
-            </label>
+            <div className="flex items-center justify-between mb-2">
+                <label className="block text-lg font-medium text-gray-700 dark:text-gray-300">
+                  {t('criteriaLabel')}
+                </label>
+                <button type="button" onClick={handleSuggestCriteria} disabled={isSuggestingCriteria} className="flex items-center gap-2 text-sm font-semibold py-2 px-3 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-wait">
+                    {isSuggestingCriteria ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
+                    {isSuggestingCriteria ? t('suggestingCriteria') : t('suggestCriteria')}
+                </button>
+            </div>
              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('criteriaDescription')}</p>
             <div className="flex flex-wrap gap-2 mb-3">
               {criteria.map((c) => (

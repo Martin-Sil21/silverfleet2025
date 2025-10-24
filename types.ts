@@ -19,7 +19,6 @@ export interface ToolNode {
   id: string; // n8n node id or generated id
   name: string;
   nodeType: string; // The original n8n node type
-  simulatedOutput: string;
 }
 
 export type WorkflowNode = AgentNode | ToolNode;
@@ -54,11 +53,23 @@ export interface Analysis {
   criteriaBreakdown: CriterionAnalysis[];
 }
 
+export interface TraceEvent {
+  step: number;
+  turn: number;
+  nodeId: string;
+  nodeName: string;
+  nodeType: 'agent' | 'tool' | 'user';
+  eventType: 'INPUT' | 'OUTPUT';
+  content: string;
+}
+
+
 export interface AuditResult {
   id: string;
   testCase: TestCase;
   conversation: ConversationTurn[];
   analysis: Analysis;
+  fullTrace: TraceEvent[];
 }
 
 export interface ImprovementData {
