@@ -330,36 +330,57 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], language: s
     }
 }
 
+const processSingleTestCase = async (
+    config: AuditConfig,
+    testCase: TestCase,
+    language: string
+): Promise<AuditResult> => {
+    const { conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase);
+    const analysis = await analyzeConversation(config.workflow, config.criteria, fullTrace, language);
+
+    return {
+        id: testCase.id,
+        testCase,
+        conversation,
+        analysis,
+        fullTrace,
+    };
+};
+
 export const runAuditOnTestCases = async (
     config: AuditConfig,
     testCases: TestCase[],
     setProgress: (message: string) => void,
     language: string
 ): Promise<AuditResult[]> => {
+    const CONCURRENCY_LIMIT = 3;
     const results: AuditResult[] = [];
-    for (let i = 0; i < testCases.length; i++) {
-        const testCase = testCases[i];
-        setProgress(`Running test case ${i + 1}/${testCases.length}: "${testCase.title}"`);
-        const { conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase);
-        
-        await delay(API_CALL_DELAY_MS); // Add delay between conversation and analysis
-        
-        setProgress(`Analyzing results for test case ${i + 1}/${testCases.length}...`);
-        const analysis = await analyzeConversation(config.workflow, config.criteria, fullTrace, language);
+    const queue = [...testCases];
+    let completedCount = 0;
 
-        results.push({
-            id: testCase.id,
-            testCase,
-            conversation,
-            analysis,
-            fullTrace,
-        });
-        
-        if (i < testCases.length - 1) {
-            await delay(API_CALL_DELAY_MS);
+    const worker = async () => {
+        while (queue.length > 0) {
+            const testCase = queue.shift();
+            if (testCase) {
+                try {
+                    const result = await processSingleTestCase(config, testCase, language);
+                    results.push(result);
+                } catch (error) {
+                    console.error(`Test case "${testCase.title}" failed:`, error);
+                    // Skip failed test case, but still count it as completed for progress.
+                } finally {
+                    completedCount++;
+                    setProgress(`Completed ${completedCount} of ${testCases.length} test cases...`);
+                }
+            }
         }
-    }
-    return results;
+    };
+
+    const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
+    await Promise.all(workers);
+
+    const testCaseOrder = testCases.map(tc => tc.id);
+    return results.sort((a, b) => testCaseOrder.indexOf(a.id) - testCaseOrder.indexOf(b.id));
 }
 
 export const runFullAudit = async (
@@ -374,8 +395,9 @@ export const runFullAudit = async (
         throw new Error("Failed to generate test cases.");
     }
     
-    await delay(API_CALL_DELAY_MS); // Add delay after generating test cases
+    await delay(API_CALL_DELAY_MS);
 
+    setProgress(`Running ${testCases.length} test cases...`);
     const results = await runAuditOnTestCases(config, testCases, setProgress, language);
 
     setProgress('Audit complete!');
@@ -392,7 +414,7 @@ export const runImprovementCycle = async (
     setProgress("Analyzing results and generating improvements...");
     const { improvedWorkflow, explanation } = await improveSystemPrompt(config, originalResults, language);
     
-    await delay(API_CALL_DELAY_MS); // Add delay after generating improvements
+    await delay(API_CALL_DELAY_MS);
     
     const newConfig: AuditConfig = {
         ...config,
