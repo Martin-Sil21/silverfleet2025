@@ -54,5 +54,14 @@
   "inputFor": "Entrada Para",
   "outputFrom": "Salida De",
   "suggestCriteria": "Sugerir Criterios",
-  "suggestingCriteria": "Sugiriendo..."
+  "suggestingCriteria": "Sugiriendo...",
+  "n8nExecutionTitle": "Ejecución Real en n8n (Opcional)",
+  "n8nExecutionDescription": "Conecta con tu instancia de n8n self-hosted para ejecutar workflows reales en lugar de simulaciones. Requiere una instancia de n8n con API habilitada.",
+  "useRealExecution": "Usar ejecución real en n8n",
+  "n8nBaseUrl": "URL de la instancia n8n",
+  "n8nApiKey": "API Key de n8n",
+  "n8nApiKeyPlaceholder": "Genera una en Settings > API en tu n8n",
+  "n8nWorkflowId": "ID del Workflow (opcional)",
+  "n8nWorkflowIdPlaceholder": "Ej: 123 o deja vacío para usar el workflow importado",
+  "n8nWorkflowIdHint": "Si importaste un workflow, este campo puede quedar vacío"
 }

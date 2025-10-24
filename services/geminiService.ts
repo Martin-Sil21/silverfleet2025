@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type, Chat } from "@google/genai";
-import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent } from './types';
+import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent } from '../types';
+import N8nService from './n8nService';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 const API_CALL_DELAY_MS = 500; // 0.5 second delay between calls to avoid rate limiting.
@@ -330,12 +331,80 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], language: s
     }
 }
 
+/**
+ * Execute a test case using real n8n workflow execution
+ */
+const runTestCaseWithN8n = async (
+    config: AuditConfig,
+    testCase: TestCase
+): Promise<ChainedTestExecutionResult> => {
+    if (!config.n8nConfig) {
+        throw new Error('n8n configuration is required for real execution');
+    }
+
+    const n8nService = new N8nService(config.n8nConfig);
+    const conversation: ConversationTurn[] = [];
+    const fullTrace: TraceEvent[] = [];
+    let stepCounter = 0;
+
+    // Test connection
+    const connected = await n8nService.testConnection();
+    if (!connected) {
+        throw new Error('Failed to connect to n8n instance. Please check your configuration.');
+    }
+
+    for (const [turnIndex, userPrompt] of testCase.prompts.entries()) {
+        conversation.push({ author: 'user', message: userPrompt });
+
+        // Add user input to trace
+        fullTrace.push({
+            step: stepCounter++,
+            turn: turnIndex,
+            nodeId: 'user-input',
+            nodeName: 'User Input',
+            nodeType: 'user',
+            eventType: 'INPUT',
+            content: userPrompt,
+        });
+
+        // Execute the workflow in n8n with the user prompt
+        if (!config.n8nConfig.workflowId) {
+            throw new Error('Workflow ID is required for n8n execution');
+        }
+
+        const executionResult = await n8nService.executeWorkflow(
+            config.n8nConfig.workflowId,
+            { userPrompt, testCase: testCase.id, turn: turnIndex }
+        );
+
+        if (!executionResult.success) {
+            throw new Error(`n8n execution failed: ${executionResult.error}`);
+        }
+
+        // Add n8n trace events to our trace
+        fullTrace.push(...executionResult.trace.map(event => ({
+            ...event,
+            step: stepCounter++,
+            turn: turnIndex,
+        })));
+
+        // Add final output as agent response
+        conversation.push({ author: 'agent', message: executionResult.finalOutput });
+    }
+
+    return { conversation, fullTrace };
+};
+
 const processSingleTestCase = async (
     config: AuditConfig,
     testCase: TestCase,
     language: string
 ): Promise<AuditResult> => {
-    const { conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase);
+    // Decide whether to use real n8n execution or AI simulation
+    const { conversation, fullTrace } = config.useRealExecution && config.n8nConfig
+        ? await runTestCaseWithN8n(config, testCase)
+        : await runChainedTestCase(config.workflow, testCase);
+    
     const analysis = await analyzeConversation(config.workflow, config.criteria, fullTrace, language);
 
     return {
