@@ -212,13 +212,8 @@ const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[],
     }
 };
 
-<<<<<<< HEAD
 const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[], language: string): Promise<{ improvedWorkflow: WorkflowNode[], explanation: string }> => {
     const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-=======
-const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[], language: string): Promise<{ improvedWorkflow: WorkflowNode[], explanation:string }> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
->>>>>>> 3f369bbfa79235ec7b111a138241c0d37d698a6a
 
     const analysisSummary = results.map(r => ({
         test: r.testCase.title,
@@ -409,26 +404,23 @@ const processSingleTestCase = async (
     setProgress: ProgressCallback,
     progressInfo: { current: number; total: number }
 ): Promise<AuditResult> => {
-<<<<<<< HEAD
-    // Decide whether to use real n8n execution or AI simulation
-    const { conversation, fullTrace } = config.useRealExecution && config.n8nConfig
-        ? await runTestCaseWithN8n(config, testCase)
-        : await runChainedTestCase(config.workflow, testCase);
-    
-=======
     setProgress({
         message: `Executing test case: "${testCase.title}"`,
         current: progressInfo.current,
         total: progressInfo.total,
     });
-    const { conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase);
+    
+    // Decide whether to use real n8n execution or AI simulation
+    const { conversation, fullTrace } = config.useRealExecution && config.n8nConfig
+        ? await runTestCaseWithN8n(config, testCase)
+        : await runChainedTestCase(config.workflow, testCase);
     
     setProgress({
         message: `Analyzing results for: "${testCase.title}"`,
         current: progressInfo.current,
         total: progressInfo.total,
     });
->>>>>>> 3f369bbfa79235ec7b111a138241c0d37d698a6a
+    
     const analysis = await analyzeConversation(config.workflow, config.criteria, fullTrace, language);
 
     return {
