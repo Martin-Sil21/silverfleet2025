@@ -1,16 +1,15 @@
-
 import React, { useState, useMemo } from 'react';
-import type { AuditConfig, N8nAgentConfig } from '../types';
+import type { AuditConfig, ParsedN8nNode, WorkflowNode } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';
-import { XCircleIcon } from './icons/XCircleIcon';
 import Card from './Card';
 import { parseN8nWorkflow } from '../services/n8nParser';
 import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
 import { useTranslation } from '../hooks/useTranslation';
+import { XCircleIcon } from './icons/XCircleIcon';
 
 interface AgentConfigProps {
-  onStartAudit: (data: { config: AuditConfig, n8nData: N8nAgentConfig[] | null }) => void;
+  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => void;
 }
 
 const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
@@ -23,11 +22,16 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     t('defaultCriteria4'),
   ], [t]);
 
-  const [systemPrompts, setSystemPrompts] = useState<string[]>(['You are a helpful and friendly assistant.']);
+  const [workflow, setWorkflow] = useState<WorkflowNode[]>([{
+    type: 'agent',
+    id: `default-${Date.now()}`,
+    name: 'Agent 1',
+    systemPrompt: 'You are a helpful and friendly assistant.'
+  }]);
   const [criteria, setCriteria] = useState<string[]>(DEFAULT_CRITERIA);
   const [newCriterion, setNewCriterion] = useState('');
   const [testCaseCount, setTestCaseCount] = useState(5);
-  const [n8nAgents, setN8nAgents] = useState<N8nAgentConfig[] | null>(null);
+  const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nNode[] | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -35,7 +39,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     if (!file) return;
 
     setFileError(null);
-    setN8nAgents(null);
+    setParsedN8nData(null);
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -43,9 +47,26 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         const text = e.target?.result as string;
         if (!text) throw new Error("File is empty.");
         
-        const agents = parseN8nWorkflow(text);
-        setSystemPrompts(agents.map(a => a.systemPrompt));
-        setN8nAgents(agents);
+        const parsedNodes = parseN8nWorkflow(text);
+        const newWorkflow: WorkflowNode[] = parsedNodes.map(node => {
+          if (node.nodeType === 'agent' && node.systemPrompt) {
+            return {
+              type: 'agent',
+              id: node.id,
+              name: node.name,
+              systemPrompt: node.systemPrompt,
+            };
+          }
+          return {
+            type: 'tool',
+            id: node.id,
+            name: node.name,
+            nodeType: node.type,
+            simulatedOutput: '',
+          };
+        });
+        setWorkflow(newWorkflow);
+        setParsedN8nData(parsedNodes);
       } catch (error) {
         const message = error instanceof Error ? error.message : "An unknown error occurred during parsing.";
         setFileError(message);
@@ -67,30 +88,44 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     setCriteria(criteria.filter(c => c !== criterionToRemove));
   };
   
-    const handleAddAgent = () => {
-    setSystemPrompts([...systemPrompts, 'New agent prompt...']);
-    setN8nAgents(null);
+  const handleAddAgent = () => {
+    const newAgent: WorkflowNode = {
+      type: 'agent',
+      id: `manual-${Date.now()}`,
+      name: `Agent ${workflow.filter(n => n.type === 'agent').length + 1}`,
+      systemPrompt: 'New agent prompt...'
+    };
+    setWorkflow([...workflow, newAgent]);
+    setParsedN8nData(null);
   };
 
-  const handleRemoveAgent = (index: number) => {
-    if (systemPrompts.length > 1) {
-      setSystemPrompts(systemPrompts.filter((_, i) => i !== index));
-      setN8nAgents(null);
+  const handleRemoveNode = (index: number) => {
+    if (workflow.length > 1) {
+      setWorkflow(workflow.filter((_, i) => i !== index));
+      setParsedN8nData(null);
     }
   };
 
-  const handlePromptChange = (index: number, value: string) => {
-    const newPrompts = [...systemPrompts];
-    newPrompts[index] = value;
-    setSystemPrompts(newPrompts);
-    setN8nAgents(null);
+  const handleNodeChange = (index: number, value: string) => {
+    const newWorkflow = [...workflow];
+    const node = newWorkflow[index];
+    if (node.type === 'agent') {
+      node.systemPrompt = value;
+    } else {
+      node.simulatedOutput = value;
+    }
+    setWorkflow(newWorkflow);
+    setParsedN8nData(null);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (systemPrompts.every(p => p.trim()) && criteria.length > 0) {
-      const config = { systemPrompts, criteria, testCaseCount };
-      onStartAudit({ config, n8nData: n8nAgents });
+    const isWorkflowValid = workflow.every(node => 
+      node.type === 'tool' || (node.type === 'agent' && node.systemPrompt.trim())
+    );
+    if (isWorkflowValid && criteria.length > 0) {
+      const config = { workflow, criteria, testCaseCount };
+      onStartAudit({ config, n8nData: parsedN8nData });
     }
   };
 
@@ -101,7 +136,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
           {t('importN8nDescription')}
         </p>
-
         <div className="relative border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center hover:border-primary-500 dark:hover:border-primary-400 transition-colors">
           <UploadIcon className="mx-auto h-12 w-12 text-gray-400" />
           <label htmlFor="file-upload" className="mt-2 block text-sm font-semibold text-primary-600 hover:text-primary-500 cursor-pointer">
@@ -110,7 +144,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           </label>
           <p className="text-xs text-gray-500 dark:text-gray-400">{t('uploadHint')}</p>
         </div>
-
         {fileError && (
           <div className="mt-4 text-center p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg">
             <p>{fileError}</p>
@@ -123,26 +156,54 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           <h2 className="text-2xl font-semibold text-gray-800 dark:text-white text-center">{t('configTitle')}</h2>
           
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              {t('promptsLabel')}
+            <label className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-4">
+              {t('workflowConfigLabel')}
             </label>
-            <div className="space-y-4">
-              {systemPrompts.map((prompt, index) => (
-                <div key={index} className="flex items-start gap-2">
-                  <span className="pt-3 text-sm font-bold text-gray-500">{index + 1}.</span>
-                  <textarea
-                    rows={3}
-                    className="flex-grow p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                    value={prompt}
-                    onChange={(e) => handlePromptChange(index, e.target.value)}
-                    placeholder={t('promptPlaceholder', { index: index + 1 })}
-                  />
-                  <button type="button" onClick={() => handleRemoveAgent(index)} 
-                    className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
-                    disabled={systemPrompts.length <= 1}
-                  >
-                    <TrashIcon className="w-6 h-6" />
-                  </button>
+            <div className="space-y-6 border-l-2 border-gray-200 dark:border-gray-700 pl-6">
+              {workflow.map((node, index) => (
+                <div key={node.id} className="relative">
+                   <div className="absolute -left-[33px] top-1 h-4 w-4 rounded-full bg-primary-500 ring-4 ring-white dark:ring-gray-800"></div>
+                  {node.type === 'agent' ? (
+                     <div className="flex items-start gap-4">
+                        <div className="flex-grow">
+                           <h3 className="font-semibold text-gray-800 dark:text-white">{t('agentNodeTitle', { name: node.name })}</h3>
+                           <textarea
+                              rows={3}
+                              className="w-full mt-2 p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
+                              value={node.systemPrompt}
+                              onChange={(e) => handleNodeChange(index, e.target.value)}
+                              placeholder={t('promptPlaceholder', { index: index + 1 })}
+                           />
+                        </div>
+                         <button type="button" onClick={() => handleRemoveNode(index)} 
+                           className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
+                           disabled={workflow.length <= 1}
+                         >
+                           <TrashIcon className="w-6 h-6" />
+                         </button>
+                     </div>
+                  ) : (
+                      <div className="flex items-start gap-4">
+                        <div className="flex-grow">
+                            <h3 className="font-semibold text-gray-800 dark:text-white">{t('toolNodeTitle', { name: node.name })}</h3>
+                             <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t('toolNodeType', { type: node.nodeType })}</p>
+                             <p className="text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">{t('toolSimulationDescription')}</p>
+                             <textarea
+                               rows={3}
+                               className="w-full mt-2 p-3 bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-700 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
+                               value={node.simulatedOutput}
+                               onChange={(e) => handleNodeChange(index, e.target.value)}
+                               placeholder={t('toolOutputPlaceholder')}
+                             />
+                        </div>
+                        <button type="button" onClick={() => handleRemoveNode(index)} 
+                          className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
+                          disabled={workflow.length <= 1}
+                        >
+                           <TrashIcon className="w-6 h-6" />
+                        </button>
+                      </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -153,9 +214,10 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            <label className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-2">
               {t('criteriaLabel')}
             </label>
+             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('criteriaDescription')}</p>
             <div className="flex flex-wrap gap-2 mb-3">
               {criteria.map((c) => (
                 <span key={c} className="flex items-center bg-primary-100 dark:bg-primary-900 text-primary-800 dark:text-primary-200 text-sm font-medium px-3 py-1 rounded-full">
@@ -182,7 +244,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           </div>
 
           <div>
-            <label htmlFor="test-case-count" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            <label htmlFor="test-case-count" className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-2">
               {t('testCaseCountLabel', { count: testCaseCount })}
             </label>
             <input
@@ -199,7 +261,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           
           <div className="pt-4">
             <button type="submit" className="w-full py-3 px-4 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
-              disabled={systemPrompts.some(p => !p.trim()) || criteria.length === 0}
+              disabled={workflow.some(n => n.type === 'agent' && !n.systemPrompt.trim()) || criteria.length === 0}
             >
               {t('startAuditButton')}
             </button>
