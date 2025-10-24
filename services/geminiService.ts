@@ -1,6 +1,5 @@
 import { GoogleGenAI, Type, Chat } from "@google/genai";
 import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent, ParsedN8nNode } from '../types';
-import N8nService from './n8nService';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 const API_CALL_DELAY_MS = 500; // 0.5 second delay between calls to avoid rate limiting.
@@ -406,74 +405,6 @@ const runTestCaseWithN8nWebhook = async (
     return { conversation, fullTrace };
 };
 
-/**
- * Execute a test case using real n8n workflow execution via API
- */
-const runTestCaseWithN8nAPI = async (
-    config: AuditConfig,
-    testCase: TestCase
-): Promise<ChainedTestExecutionResult> => {
-    if (!config.n8nConfig || !config.n8nConfig.baseUrl || !config.n8nConfig.apiKey) {
-        throw new Error('n8n API configuration (baseUrl and apiKey) is required');
-    }
-
-    const n8nService = new N8nService({
-        baseUrl: config.n8nConfig.baseUrl,
-        apiKey: config.n8nConfig.apiKey,
-        workflowId: config.n8nConfig.workflowId,
-    });
-    const conversation: ConversationTurn[] = [];
-    const fullTrace: TraceEvent[] = [];
-    let stepCounter = 0;
-
-    // Test connection
-    const connected = await n8nService.testConnection();
-    if (!connected) {
-        throw new Error('Failed to connect to n8n instance. Please check your configuration.');
-    }
-
-    for (const [turnIndex, userPrompt] of testCase.prompts.entries()) {
-        conversation.push({ author: 'user', message: userPrompt });
-
-        // Add user input to trace
-        fullTrace.push({
-            step: stepCounter++,
-            turn: turnIndex,
-            nodeId: 'user-input',
-            nodeName: 'User Input',
-            nodeType: 'user',
-            eventType: 'INPUT',
-            content: userPrompt,
-        });
-
-        // Execute the workflow in n8n with the user prompt
-        if (!config.n8nConfig.workflowId) {
-            throw new Error('Workflow ID is required for n8n API execution');
-        }
-
-        const executionResult = await n8nService.executeWorkflow(
-            config.n8nConfig.workflowId,
-            { userPrompt, testCase: testCase.id, turn: turnIndex }
-        );
-
-        if (!executionResult.success) {
-            throw new Error(`n8n execution failed: ${executionResult.error}`);
-        }
-
-        // Add n8n trace events to our trace
-        fullTrace.push(...executionResult.trace.map(event => ({
-            ...event,
-            step: stepCounter++,
-            turn: turnIndex,
-        })));
-
-        // Add final output as agent response
-        conversation.push({ author: 'agent', message: executionResult.finalOutput });
-    }
-
-    return { conversation, fullTrace };
-};
-
 const processSingleTestCase = async (
     config: AuditConfig,
     testCase: TestCase,
@@ -487,22 +418,13 @@ const processSingleTestCase = async (
         total: progressInfo.total,
     });
     
-    // Decide whether to use real n8n execution (webhook or API) or AI simulation
+    // Decide whether to use real n8n execution (webhook) or AI simulation
     let conversation: ConversationTurn[];
     let fullTrace: TraceEvent[];
     
-    if (config.useRealExecution && config.n8nConfig) {
-        // Priorizar webhook si está disponible
-        if (config.n8nConfig.webhookUrl) {
-            ({ conversation, fullTrace } = await runTestCaseWithN8nWebhook(config.n8nConfig.webhookUrl, testCase));
-        } 
-        // Si no hay webhook, usar API
-        else if (config.n8nConfig.baseUrl && config.n8nConfig.apiKey) {
-            ({ conversation, fullTrace } = await runTestCaseWithN8nAPI(config, testCase));
-        } 
-        else {
-            throw new Error('n8n configuration requires either webhookUrl or (baseUrl + apiKey)');
-        }
+    if (config.useRealExecution && config.n8nConfig?.webhookUrl) {
+        // Ejecutar en n8n real vía webhook
+        ({ conversation, fullTrace } = await runTestCaseWithN8nWebhook(config.n8nConfig.webhookUrl, testCase));
     } else {
         // Usar simulación con IA
         ({ conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase));
