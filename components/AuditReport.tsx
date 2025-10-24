@@ -1,10 +1,12 @@
 
+
 import React, { useState, useMemo } from 'react';
 import type { AuditResult, ConversationTurn, CriterionAnalysis } from '../types';
 import Card from './Card';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
 import { XCircleIcon } from './icons/XCircleIcon';
 import { ExclamationTriangleIcon } from './icons/ExclamationTriangleIcon';
+import { useTranslation } from '../hooks/useTranslation';
 
 interface AuditReportProps {
   results: AuditResult[];
@@ -70,6 +72,7 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 
 const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
   const [isLogVisible, setIsLogVisible] = useState(false);
+  const { t } = useTranslation();
 
   return (
     <Card className="mb-6">
@@ -83,7 +86,7 @@ const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
           <p className="text-gray-700 dark:text-gray-300">{result.analysis.summary}</p>
           
           <div className="mt-4">
-            <h4 className="font-semibold text-gray-800 dark:text-gray-200">Criteria Breakdown</h4>
+            <h4 className="font-semibold text-gray-800 dark:text-gray-200">{t('criteriaBreakdown')}</h4>
              <CriterionBreakdown analysis={result.analysis.criteriaBreakdown} />
           </div>
 
@@ -91,7 +94,7 @@ const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
             onClick={() => setIsLogVisible(!isLogVisible)}
             className="mt-4 text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
           >
-            {isLogVisible ? 'Hide' : 'Show'} Conversation Log
+            {isLogVisible ? t('hideLog') : t('showLog')}
           </button>
           {isLogVisible && <ConversationLog conversation={result.conversation} />}
         </div>
@@ -101,6 +104,7 @@ const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
 };
 
 const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImprovement }) => {
+  const { t } = useTranslation();
   const overallAverageScore = useMemo(() => {
     if (results.length === 0) return 0;
     const total = results.reduce((sum, r) => sum + r.analysis.overallScore, 0);
@@ -112,11 +116,11 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImpr
         <Card className="mb-8">
             <div className="flex flex-col md:flex-row items-center justify-between gap-6">
                 <div>
-                    <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Audit Report</h2>
-                    <p className="text-gray-600 dark:text-gray-400 mt-1">Summary of all test cases executed.</p>
+                    <h2 className="text-3xl font-bold text-gray-800 dark:text-white">{t('auditReportTitle')}</h2>
+                    <p className="text-gray-600 dark:text-gray-400 mt-1">{t('auditReportDescription')}</p>
                 </div>
                 <div className="text-center">
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Overall Average Score</p>
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{t('overallAverageScore')}</p>
                     <ScoreIndicator score={overallAverageScore} />
                 </div>
             </div>
@@ -131,13 +135,13 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImpr
           onClick={onReset}
           className="py-3 px-6 bg-gray-600 text-white font-semibold rounded-lg shadow-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-transform transform hover:scale-105"
         >
-          Run New Audit
+          {t('runNewAudit')}
         </button>
         <button
           onClick={onStartImprovement}
           className="py-3 px-6 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105"
         >
-          Suggest & Test Improvements
+          {t('suggestImprovements')}
         </button>
       </div>
     </div>

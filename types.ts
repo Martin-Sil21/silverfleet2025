@@ -45,7 +45,7 @@ export interface AuditResult {
 }
 
 export interface ImprovementData {
-  improvedPrompt: string;
+  improvedPrompts: string[];
   explanation: string;
   newResults: AuditResult[];
 }
