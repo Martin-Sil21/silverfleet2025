@@ -1,12 +1,12 @@
 import { GoogleGenAI, Type, Chat } from "@google/genai";
-import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode } from './types';
+import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent } from './types';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-const API_CALL_DELAY_MS = 500; // 2.5 second delay between calls to avoid rate limiting.
+const API_CALL_DELAY_MS = 500; // 0.5 second delay between calls to avoid rate limiting.
 
 interface ChainedTestExecutionResult {
     conversation: ConversationTurn[];
-    fullTrace: string;
+    fullTrace: TraceEvent[];
 }
 
 const getLanguageInstruction = (language: string): string => {
@@ -19,7 +19,7 @@ const formatWorkflowForPrompt = (workflow: WorkflowNode[]): string => {
         if (node.type === 'agent') {
             return `Step ${index + 1} (AI Agent - ${node.name}): System Prompt: "${node.systemPrompt}"`;
         } else {
-            return `Step ${index + 1} (Tool - ${node.name}): This tool simulates the output of a non-AI node. During the test, it will provide the following data as context for the next step: "${node.simulatedOutput}"`;
+            return `Step ${index + 1} (Tool - ${node.name}): This is a non-AI tool node of type "${node.nodeType}". Its output will be simulated based on the input it receives.`;
         }
     }).join('\n');
 };
@@ -30,7 +30,7 @@ const generateTestCases = async (config: AuditConfig, language: string): Promise
 
     const prompt = `
     Based on the following AI agent workflow and audit criteria, please generate ${testCaseCount} diverse and comprehensive test cases.
-    The workflow may contain both AI agents and simulated tool nodes that provide context.
+    The workflow may contain both AI agents and tool nodes whose outputs are simulated by another AI.
     Each test case should include a unique ID, a concise title, a scenario description, and an array of user prompts to simulate a conversation.
     The goal is to create test cases that can effectively evaluate the entire workflow's end-to-end performance against the provided criteria.
 
@@ -78,30 +78,27 @@ const generateTestCases = async (config: AuditConfig, language: string): Promise
 
 const runChainedTestCase = async (workflow: WorkflowNode[], testCase: TestCase): Promise<ChainedTestExecutionResult> => {
     const conversation: ConversationTurn[] = [];
-    let fullTrace = `Test Case: "${testCase.title}"\nScenario: ${testCase.scenario}\n\n`;
+    const fullTrace: TraceEvent[] = [];
+    let stepCounter = 0;
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
     const chatSessions: Map<string, Chat> = new Map();
 
-    for (const [index, userPrompt] of testCase.prompts.entries()) {
-        fullTrace += `--- CONVERSATION TURN ${index + 1} ---\n`;
-        fullTrace += `USER (to first agent): ${userPrompt}\n`;
+    for (const [turnIndex, userPrompt] of testCase.prompts.entries()) {
         conversation.push({ author: 'user', message: userPrompt });
 
         let currentInput = userPrompt;
 
         // Process the input through the chain of agents and tools
         for (const [nodeIndex, node] of workflow.entries()) {
-             fullTrace += `\nEXECUTING Step ${nodeIndex + 1}: ${node.type.toUpperCase()} - ${node.name}\n`;
-             
              // Add a delay BETWEEN each node call to avoid rate limiting
              if (nodeIndex > 0) {
                 await delay(API_CALL_DELAY_MS);
              }
 
              if (node.type === 'agent') {
-                fullTrace += `  Input: ${currentInput.substring(0, 200)}...\n`;
-
+                fullTrace.push({ step: stepCounter++, turn: turnIndex, nodeId: node.id, nodeName: node.name, nodeType: 'agent', eventType: 'INPUT', content: currentInput });
+                
                 if (!chatSessions.has(node.id)) {
                     chatSessions.set(node.id, ai.chats.create({
                         model: 'gemini-2.5-flash',
@@ -111,23 +108,50 @@ const runChainedTestCase = async (workflow: WorkflowNode[], testCase: TestCase):
                 const chat = chatSessions.get(node.id)!;
                 const result = await chat.sendMessage({ message: currentInput });
                 currentInput = result.text;
-                fullTrace += `  Output: ${currentInput}\n`;
-             } else { // It's a tool node
-                fullTrace += `  Simulated Output (will be passed to next step): ${node.simulatedOutput}\n`;
-                currentInput = node.simulatedOutput;
+
+                fullTrace.push({ step: stepCounter++, turn: turnIndex, nodeId: node.id, nodeName: node.name, nodeType: 'agent', eventType: 'OUTPUT', content: currentInput });
+             } else { // It's a tool node, now with AI simulation
+                fullTrace.push({ step: stepCounter++, turn: turnIndex, nodeId: node.id, nodeName: node.name, nodeType: 'tool', eventType: 'INPUT', content: currentInput });
+                
+                const toolSimulationPrompt = `
+                You are a simulation of an n8n tool node. Your name is "${node.name}" and your type is "${node.nodeType}".
+                You have just received the following data as input from the previous step:
+
+                INPUT:
+                """
+                ${currentInput}
+                """
+
+                Based on your function (e.g., database query, API call, data transformation), generate a realistic, plausible output that the next node in the workflow would expect.
+                For example, if you are a database node creating a user, return a success message with a user ID. If you are an HTTP request node fetching weather, return sample weather data.
+                
+                Return ONLY the simulated output data. Do not add any explanatory text, apologies, or markdown formatting. Just the raw, simulated output.
+                `;
+
+                const toolResponse = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: toolSimulationPrompt
+                });
+                
+                currentInput = toolResponse.text;
+                
+                fullTrace.push({ step: stepCounter++, turn: turnIndex, nodeId: node.id, nodeName: node.name, nodeType: 'tool', eventType: 'OUTPUT', content: currentInput });
              }
         }
         
         const finalAgentMessage = currentInput;
         conversation.push({ author: 'agent', message: finalAgentMessage });
-        fullTrace += `--------------------------------\n\n`;
     }
     return { conversation, fullTrace };
 };
 
 
-const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[], fullTrace: string, language: string): Promise<Analysis> => {
+const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[], fullTrace: TraceEvent[], language: string): Promise<Analysis> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+    const formattedTrace = fullTrace.map(event => 
+      `Step ${event.step}: [Node: ${event.nodeName} (${event.nodeType})] received ${event.eventType} - Content: \n"${event.content.substring(0, 300)}..."`
+    ).join('\n');
 
     const prompt = `
     As an expert AI auditor, analyze the following execution trace of a multi-step AI workflow.
@@ -137,8 +161,8 @@ const analyzeConversation = async (workflow: WorkflowNode[], criteria: string[],
     
     Audit Criteria: ${criteria.join(', ')}
     
-    Full Execution Trace (showing user inputs, intermediate tool outputs, and agent outputs):
-    ${fullTrace}
+    Full Execution Trace (showing user inputs, intermediate AI-simulated tool outputs, and agent outputs):
+    ${formattedTrace}
     
     Provide a detailed analysis based on the criteria. For each criterion, give a score from 1 to 10 and a concise justification for the final output. 
     Also, provide an overall summary of the workflow's performance and a final overall score (1-10).
@@ -265,6 +289,47 @@ const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[], 
     }
 };
 
+export const suggestAuditCriteria = async (workflow: WorkflowNode[], language: string): Promise<string[]> => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const prompt = `
+    As an expert in testing and quality assurance for AI systems, analyze the following workflow.
+    The workflow consists of AI agents and automated tool nodes. Your task is to propose a set of 5 to 7 highly relevant and specific audit criteria to evaluate its end-to-end performance and robustness.
+
+    Workflow to Analyze:
+    ${formatWorkflowForPrompt(workflow)}
+
+    Instructions:
+    -   Go beyond generic criteria like "be helpful".
+    -   Think about the specific purpose of this workflow. What does success look like? What are the potential failure modes?
+    -   If it involves data (like from a database tool), suggest criteria about data integrity or correct interpretation.
+    -   If it's a multi-step reasoning task, suggest criteria about logical consistency between steps.
+    -   The criteria should be measurable and actionable.
+
+    Return your response as a single JSON array of strings.
+    ${getLanguageInstruction(language)}
+    `;
+
+    const response = await ai.models.generateContent({
+        model: 'gemini-2.5-pro',
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING }
+            },
+        },
+    });
+    
+    try {
+        const jsonText = response.text.trim();
+        return JSON.parse(jsonText) as string[];
+    } catch (e) {
+        console.error("Failed to parse suggested criteria JSON:", response.text);
+        throw new Error("Could not suggest criteria. The model returned malformed JSON.");
+    }
+}
+
 export const runAuditOnTestCases = async (
     config: AuditConfig,
     testCases: TestCase[],
@@ -287,6 +352,7 @@ export const runAuditOnTestCases = async (
             testCase,
             conversation,
             analysis,
+            fullTrace,
         });
         
         if (i < testCases.length - 1) {

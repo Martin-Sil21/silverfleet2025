@@ -1,17 +1,17 @@
-
-
 import React, { useState, useMemo } from 'react';
-import type { AuditResult, ConversationTurn, CriterionAnalysis } from '../types';
+import type { AuditResult, ConversationTurn, CriterionAnalysis, AuditConfig } from '../types';
 import Card from './Card';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
 import { XCircleIcon } from './icons/XCircleIcon';
 import { ExclamationTriangleIcon } from './icons/ExclamationTriangleIcon';
 import { useTranslation } from '../hooks/useTranslation';
+import VisualTracePlayer from './VisualTracePlayer';
 
 interface AuditReportProps {
   results: AuditResult[];
   onReset: () => void;
   onStartImprovement: () => void;
+  config: AuditConfig;
 }
 
 const ScoreIndicator: React.FC<{ score: number }> = ({ score }) => {
@@ -70,8 +70,9 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 );
 
 
-const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
+const ReportCard: React.FC<{ result: AuditResult, workflow: AuditConfig['workflow'] }> = ({ result, workflow }) => {
   const [isLogVisible, setIsLogVisible] = useState(false);
+  const [isTraceVisible, setIsTraceVisible] = useState(false);
   const { t } = useTranslation();
 
   return (
@@ -90,20 +91,29 @@ const ReportCard: React.FC<{ result: AuditResult }> = ({ result }) => {
              <CriterionBreakdown analysis={result.analysis.criteriaBreakdown} />
           </div>
 
-          <button
-            onClick={() => setIsLogVisible(!isLogVisible)}
-            className="mt-4 text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
-          >
-            {isLogVisible ? t('hideLog') : t('showLog')}
-          </button>
+          <div className="flex items-center gap-4 mt-4">
+            <button
+              onClick={() => setIsLogVisible(!isLogVisible)}
+              className="text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
+            >
+              {isLogVisible ? t('hideLog') : t('showLog')}
+            </button>
+            <button
+              onClick={() => setIsTraceVisible(!isTraceVisible)}
+              className="text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
+            >
+              {isTraceVisible ? t('hideVisualTrace') : t('showVisualTrace')}
+            </button>
+          </div>
           {isLogVisible && <ConversationLog conversation={result.conversation} />}
+          {isTraceVisible && <VisualTracePlayer trace={result.fullTrace} workflow={workflow} />}
         </div>
       </div>
     </Card>
   );
 };
 
-const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImprovement }) => {
+const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImprovement, config }) => {
   const { t } = useTranslation();
   const overallAverageScore = useMemo(() => {
     if (results.length === 0) return 0;
@@ -127,7 +137,7 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, onStartImpr
         </Card>
 
       {results.map((result) => (
-        <ReportCard key={result.id} result={result} />
+        <ReportCard key={result.id} result={result} workflow={config.workflow} />
       ))}
       
       <div className="text-center mt-8 flex flex-col sm:flex-row justify-center items-center gap-4">
