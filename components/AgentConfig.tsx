@@ -41,9 +41,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
   
   // n8n Real Execution Config
   const [useRealExecution, setUseRealExecution] = useState(false);
-  const [n8nBaseUrl, setN8nBaseUrl] = useState('');
-  const [n8nApiKey, setN8nApiKey] = useState('');
-  const [n8nWorkflowId, setN8nWorkflowId] = useState('');
+  const [n8nWebhookUrl, setN8nWebhookUrl] = useState('');
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -155,11 +153,9 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         criteria,
         testCaseCount,
         useRealExecution,
-        ...(useRealExecution && {
+        ...(useRealExecution && n8nWebhookUrl && {
           n8nConfig: {
-            baseUrl: n8nBaseUrl,
-            apiKey: n8nApiKey,
-            workflowId: n8nWorkflowId || undefined,
+            webhookUrl: n8nWebhookUrl,
           }
         })
       };
@@ -212,46 +208,21 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           {useRealExecution && (
             <div className="pl-6 border-l-2 border-primary-500 space-y-4 animate-fadeIn">
               <div>
-                <label htmlFor="n8n-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  {t('n8nBaseUrl')}
+                <label htmlFor="n8n-webhook-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  {t('n8nWebhookUrl')} <span className="text-red-500">*</span>
                 </label>
                 <input
-                  id="n8n-url"
-                  type="text"
-                  value={n8nBaseUrl}
-                  onChange={(e) => setN8nBaseUrl(e.target.value)}
-                  placeholder="https://your-n8n-instance.com"
-                  className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
+                  id="n8n-webhook-url"
+                  type="url"
+                  value={n8nWebhookUrl}
+                  onChange={(e) => setN8nWebhookUrl(e.target.value)}
+                  placeholder="https://silverfleet.online/webhook/590785a9-e814-4a42-959a-7e8e4ff5ab9e"
+                  className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition font-mono text-sm"
+                  required={useRealExecution}
                 />
-              </div>
-
-              <div>
-                <label htmlFor="n8n-api-key" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  {t('n8nApiKey')}
-                </label>
-                <input
-                  id="n8n-api-key"
-                  type="password"
-                  value={n8nApiKey}
-                  onChange={(e) => setN8nApiKey(e.target.value)}
-                  placeholder={t('n8nApiKeyPlaceholder')}
-                  className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="n8n-workflow-id" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  {t('n8nWorkflowId')}
-                </label>
-                <input
-                  id="n8n-workflow-id"
-                  type="text"
-                  value={n8nWorkflowId}
-                  onChange={(e) => setN8nWorkflowId(e.target.value)}
-                  placeholder={t('n8nWorkflowIdPlaceholder')}
-                  className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                />
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{t('n8nWorkflowIdHint')}</p>
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  💡 {t('n8nWebhookHint')}
+                </p>
               </div>
             </div>
           )}

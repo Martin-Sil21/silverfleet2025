@@ -334,17 +334,94 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], language: s
 }
 
 /**
- * Execute a test case using real n8n workflow execution
+ * Execute a test case using real n8n workflow execution via webhook
  */
-const runTestCaseWithN8n = async (
+const runTestCaseWithN8nWebhook = async (
+    webhookUrl: string,
+    testCase: TestCase
+): Promise<ChainedTestExecutionResult> => {
+    const conversation: ConversationTurn[] = [];
+    const fullTrace: TraceEvent[] = [];
+    let stepCounter = 0;
+
+    for (const [turnIndex, userPrompt] of testCase.prompts.entries()) {
+        conversation.push({ author: 'user', message: userPrompt });
+
+        // Add user input to trace
+        fullTrace.push({
+            step: stepCounter++,
+            turn: turnIndex,
+            nodeId: 'user-input',
+            nodeName: 'User Input',
+            nodeType: 'user',
+            eventType: 'INPUT',
+            content: userPrompt,
+        });
+
+        try {
+            // Llamar al webhook de n8n
+            const response = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    userPrompt,
+                    testCaseId: testCase.id,
+                    testCaseTitle: testCase.title,
+                    turn: turnIndex,
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Webhook responded with status ${response.status}`);
+            }
+
+            const result = await response.json();
+            
+            // Agregar traza del webhook
+            fullTrace.push({
+                step: stepCounter++,
+                turn: turnIndex,
+                nodeId: 'n8n-webhook',
+                nodeName: 'n8n Workflow',
+                nodeType: 'tool',
+                eventType: 'OUTPUT',
+                content: JSON.stringify(result, null, 2),
+            });
+
+            // Extraer la respuesta
+            const agentMessage = typeof result === 'string' 
+                ? result 
+                : result.response || result.output || result.message || JSON.stringify(result);
+
+            conversation.push({ author: 'agent', message: agentMessage });
+
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to execute n8n webhook: ${errorMsg}`);
+        }
+    }
+
+    return { conversation, fullTrace };
+};
+
+/**
+ * Execute a test case using real n8n workflow execution via API
+ */
+const runTestCaseWithN8nAPI = async (
     config: AuditConfig,
     testCase: TestCase
 ): Promise<ChainedTestExecutionResult> => {
-    if (!config.n8nConfig) {
-        throw new Error('n8n configuration is required for real execution');
+    if (!config.n8nConfig || !config.n8nConfig.baseUrl || !config.n8nConfig.apiKey) {
+        throw new Error('n8n API configuration (baseUrl and apiKey) is required');
     }
 
-    const n8nService = new N8nService(config.n8nConfig);
+    const n8nService = new N8nService({
+        baseUrl: config.n8nConfig.baseUrl,
+        apiKey: config.n8nConfig.apiKey,
+        workflowId: config.n8nConfig.workflowId,
+    });
     const conversation: ConversationTurn[] = [];
     const fullTrace: TraceEvent[] = [];
     let stepCounter = 0;
@@ -371,7 +448,7 @@ const runTestCaseWithN8n = async (
 
         // Execute the workflow in n8n with the user prompt
         if (!config.n8nConfig.workflowId) {
-            throw new Error('Workflow ID is required for n8n execution');
+            throw new Error('Workflow ID is required for n8n API execution');
         }
 
         const executionResult = await n8nService.executeWorkflow(
@@ -410,10 +487,26 @@ const processSingleTestCase = async (
         total: progressInfo.total,
     });
     
-    // Decide whether to use real n8n execution or AI simulation
-    const { conversation, fullTrace } = config.useRealExecution && config.n8nConfig
-        ? await runTestCaseWithN8n(config, testCase)
-        : await runChainedTestCase(config.workflow, testCase);
+    // Decide whether to use real n8n execution (webhook or API) or AI simulation
+    let conversation: ConversationTurn[];
+    let fullTrace: TraceEvent[];
+    
+    if (config.useRealExecution && config.n8nConfig) {
+        // Priorizar webhook si está disponible
+        if (config.n8nConfig.webhookUrl) {
+            ({ conversation, fullTrace } = await runTestCaseWithN8nWebhook(config.n8nConfig.webhookUrl, testCase));
+        } 
+        // Si no hay webhook, usar API
+        else if (config.n8nConfig.baseUrl && config.n8nConfig.apiKey) {
+            ({ conversation, fullTrace } = await runTestCaseWithN8nAPI(config, testCase));
+        } 
+        else {
+            throw new Error('n8n configuration requires either webhookUrl or (baseUrl + apiKey)');
+        }
+    } else {
+        // Usar simulación con IA
+        ({ conversation, fullTrace } = await runChainedTestCase(config.workflow, testCase));
+    }
     
     setProgress({
         message: `Analyzing results for: "${testCase.title}"`,
