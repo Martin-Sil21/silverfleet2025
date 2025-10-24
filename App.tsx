@@ -1,9 +1,9 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nNode, type WorkflowNode } from './types';
 import AgentConfig from './components/AgentConfig';
 import AuditProgress from './components/AuditProgress';
 import AuditReport from './components/AuditReport';
-import { runFullAudit, runImprovementCycle, generateImprovedN8nJson } from './services/geminiService';
+import { runFullAudit, runImprovementCycle } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
 import { useTranslation } from './hooks/useTranslation';
@@ -16,7 +16,6 @@ const App: React.FC = () => {
   const [originalAuditResults, setOriginalAuditResults] = useState<AuditResult[]>([]);
   const [improvementData, setImprovementData] = useState<ImprovementData | null>(null);
   const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nNode[] | null>(null);
-  const [originalN8nJson, setOriginalN8nJson] = useState<any>(null); // JSON original de n8n
   const [progressMessage, setProgressMessage] = useState('');
   const [progressLogs, setProgressLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ current: number, total: number }>({ current: 0, total: 0 });
@@ -32,11 +31,10 @@ const App: React.FC = () => {
     }));
   };
 
-  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null, n8nJson?: any }) => {
+  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => {
     setAuditStatus(AuditStatus.AUDITING);
     setAuditConfig(data.config);
     setN8nNodeData(data.n8nData);
-    setOriginalN8nJson(data.n8nJson || null);
     setErrorMessage('');
     setImprovementData(null);
     setProgress({ current: 0, total: data.config.testCaseCount });
@@ -59,7 +57,7 @@ const App: React.FC = () => {
   }, [language, t]);
 
   const handleStartImprovement = useCallback(async () => {
-    if (!auditConfig || !originalAuditResults.length) return;
+    if (!auditConfig || !originalAuditResults.length || auditStatus === AuditStatus.IMPROVING) return;
     
     setAuditStatus(AuditStatus.IMPROVING);
     setErrorMessage('');
@@ -68,17 +66,7 @@ const App: React.FC = () => {
 
     try {
       await runImprovementCycle(auditConfig, originalAuditResults, handleProgressUpdate, (data) => {
-        // Generar el JSON mejorado de n8n si existe el original
-        const improvedJson = originalN8nJson 
-          ? generateImprovedN8nJson(originalN8nJson, data.improvedWorkflow)
-          : null;
-        
-        const fullImprovementData: ImprovementData = {
-          ...data,
-          improvedN8nJson: improvedJson
-        };
-        
-        setImprovementData(fullImprovementData);
+        setImprovementData(data);
         setAuditResults(data.newResults); // Update results to show the new ones
         setAuditStatus(AuditStatus.IMPROVEMENT_REPORT_READY);
       }, language);
@@ -90,7 +78,17 @@ const App: React.FC = () => {
       setProgressLogs(prev => [...prev, `[ERROR] ${message}`]);
       setAuditStatus(AuditStatus.ERROR);
     }
-  }, [auditConfig, originalAuditResults, language, t]);
+  }, [auditConfig, originalAuditResults, language, t, auditStatus]);
+
+  useEffect(() => {
+    if (auditStatus === AuditStatus.REPORT_READY) {
+      const timer = setTimeout(() => {
+        handleStartImprovement();
+      }, 5000); // 5-second delay to allow user to see the report first
+
+      return () => clearTimeout(timer);
+    }
+  }, [auditStatus, handleStartImprovement]);
   
   const handleReset = () => {
     setAuditStatus(AuditStatus.CONFIG);
@@ -113,7 +111,7 @@ const App: React.FC = () => {
         return <AuditProgress message={progressMessage} title={t('improvementInProgress')} progress={progress} logs={progressLogs} />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
-        return <AuditReport results={auditResults} onReset={handleReset} onStartImprovement={handleStartImprovement} config={auditConfig} />;
+        return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !originalAuditResults.length || !auditConfig) {
             return (
