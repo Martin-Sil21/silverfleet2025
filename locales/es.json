@@ -54,5 +54,6 @@
   "inputFor": "Entrada Para",
   "outputFrom": "Salida De",
   "suggestCriteria": "Sugerir Criterios",
-  "suggestingCriteria": "Sugiriendo..."
+  "suggestingCriteria": "Sugiriendo...",
+  "activityLog": "Registro de Actividad"
 }

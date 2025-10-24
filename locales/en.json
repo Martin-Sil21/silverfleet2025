@@ -54,5 +54,6 @@
   "inputFor": "Input For",
   "outputFrom": "Output From",
   "suggestCriteria": "Suggest Criteria",
-  "suggestingCriteria": "Suggesting..."
+  "suggestingCriteria": "Suggesting...",
+  "activityLog": "Activity Log"
 }
