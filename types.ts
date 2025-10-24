@@ -24,9 +24,10 @@ export interface ToolNode {
 export type WorkflowNode = AgentNode | ToolNode;
 
 export interface N8nConfig {
-  baseUrl: string; // e.g., "https://your-n8n.com"
-  apiKey: string;
-  workflowId?: string; // Optional: ID del workflow a auditar
+  webhookUrl?: string; // URL del webhook de n8n (ej: https://silverfleet.online/webhook/xxx)
+  baseUrl?: string; // Solo si usas API: "https://your-n8n.com"
+  apiKey?: string; // Solo si usas API
+  workflowId?: string; // Solo si usas API: ID del workflow a auditar
 }
 
 export interface AuditConfig {

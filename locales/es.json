@@ -55,17 +55,10 @@
   "outputFrom": "Salida De",
   "suggestCriteria": "Sugerir Criterios",
   "suggestingCriteria": "Sugiriendo...",
-<<<<<<< HEAD
   "n8nExecutionTitle": "Ejecución Real en n8n (Opcional)",
-  "n8nExecutionDescription": "Conecta con tu instancia de n8n self-hosted para ejecutar workflows reales en lugar de simulaciones. Requiere una instancia de n8n con API habilitada.",
+  "n8nExecutionDescription": "Conecta tu workflow de n8n mediante webhook para ejecutar pruebas reales. Mucho más simple que usar la API.",
   "useRealExecution": "Usar ejecución real en n8n",
-  "n8nBaseUrl": "URL de la instancia n8n",
-  "n8nApiKey": "API Key de n8n",
-  "n8nApiKeyPlaceholder": "Genera una en Settings > API en tu n8n",
-  "n8nWorkflowId": "ID del Workflow (opcional)",
-  "n8nWorkflowIdPlaceholder": "Ej: 123 o deja vacío para usar el workflow importado",
-  "n8nWorkflowIdHint": "Si importaste un workflow, este campo puede quedar vacío"
-=======
+  "n8nWebhookUrl": "URL del Webhook de n8n",
+  "n8nWebhookHint": "Copia la URL del webhook de tu workflow en n8n. El sistema enviará los prompts de prueba a este webhook y analizará las respuestas.",
   "activityLog": "Registro de Actividad"
->>>>>>> 3f369bbfa79235ec7b111a138241c0d37d698a6a
 }
