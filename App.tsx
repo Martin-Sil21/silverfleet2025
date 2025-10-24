@@ -17,8 +17,19 @@ const App: React.FC = () => {
   const [improvementData, setImprovementData] = useState<ImprovementData | null>(null);
   const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nNode[] | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
+  const [progressLogs, setProgressLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState<{ current: number, total: number }>({ current: 0, total: 0 });
   const [errorMessage, setErrorMessage] = useState('');
   const { t, language } = useTranslation();
+
+  const handleProgressUpdate = (update: { message: string, current?: number, total?: number }) => {
+    setProgressMessage(update.message);
+    setProgressLogs(prev => [...prev, update.message]);
+    setProgress(prev => ({
+        current: update.current ?? prev.current,
+        total: update.total ?? prev.total,
+    }));
+  };
 
   const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => {
     setAuditStatus(AuditStatus.AUDITING);
@@ -26,8 +37,11 @@ const App: React.FC = () => {
     setN8nNodeData(data.n8nData);
     setErrorMessage('');
     setImprovementData(null);
+    setProgress({ current: 0, total: data.config.testCaseCount });
+    setProgressLogs([]);
+
     try {
-      await runFullAudit(data.config, setProgressMessage, (results) => {
+      await runFullAudit(data.config, handleProgressUpdate, (results) => {
         setAuditResults(results);
         setOriginalAuditResults(results);
         setAuditStatus(AuditStatus.REPORT_READY);
@@ -35,7 +49,9 @@ const App: React.FC = () => {
     } catch (error) {
       console.error("Audit failed:", error);
       const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-      setErrorMessage(`${t('errorTitle')}: ${message}`);
+      const fullMessage = `${t('errorTitle')}: ${message}`;
+      setErrorMessage(fullMessage);
+      setProgressLogs(prev => [...prev, `[ERROR] ${message}`]);
       setAuditStatus(AuditStatus.ERROR);
     }
   }, [language, t]);
@@ -45,8 +61,11 @@ const App: React.FC = () => {
     
     setAuditStatus(AuditStatus.IMPROVING);
     setErrorMessage('');
+    setProgress({ current: 0, total: originalAuditResults.length });
+    setProgressLogs([]);
+
     try {
-      await runImprovementCycle(auditConfig, originalAuditResults, setProgressMessage, (data) => {
+      await runImprovementCycle(auditConfig, originalAuditResults, handleProgressUpdate, (data) => {
         setImprovementData(data);
         setAuditResults(data.newResults); // Update results to show the new ones
         setAuditStatus(AuditStatus.IMPROVEMENT_REPORT_READY);
@@ -54,7 +73,9 @@ const App: React.FC = () => {
     } catch (error) {
        console.error("Improvement cycle failed:", error);
       const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-      setErrorMessage(`${t('errorTitle')}: ${message}`);
+      const fullMessage = `${t('errorTitle')}: ${message}`;
+      setErrorMessage(fullMessage);
+      setProgressLogs(prev => [...prev, `[ERROR] ${message}`]);
       setAuditStatus(AuditStatus.ERROR);
     }
   }, [auditConfig, originalAuditResults, language, t]);
@@ -67,15 +88,17 @@ const App: React.FC = () => {
     setImprovementData(null);
     setN8nNodeData(null);
     setProgressMessage('');
+    setProgressLogs([]);
+    setProgress({ current: 0, total: 0 });
     setErrorMessage('');
   };
 
   const renderContent = () => {
     switch (auditStatus) {
       case AuditStatus.AUDITING:
-        return <AuditProgress message={progressMessage} title={t('auditInProgress')} />;
+        return <AuditProgress message={progressMessage} title={t('auditInProgress')} progress={progress} logs={progressLogs} />;
       case AuditStatus.IMPROVING:
-        return <AuditProgress message={progressMessage} title={t('improvementInProgress')} />;
+        return <AuditProgress message={progressMessage} title={t('improvementInProgress')} progress={progress} logs={progressLogs} />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
         return <AuditReport results={auditResults} onReset={handleReset} onStartImprovement={handleStartImprovement} config={auditConfig} />;
