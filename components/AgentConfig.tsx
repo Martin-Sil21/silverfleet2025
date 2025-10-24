@@ -12,7 +12,7 @@ import { suggestAuditCriteria } from '../services/geminiService';
 import Loader from './Loader';
 
 interface AgentConfigProps {
-  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => void;
+  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null, n8nJson?: any }) => void;
 }
 
 const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
@@ -35,6 +35,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
   const [newCriterion, setNewCriterion] = useState('');
   const [testCaseCount, setTestCaseCount] = useState(5);
   const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nNode[] | null>(null);
+  const [originalN8nJson, setOriginalN8nJson] = useState<any>(null); // JSON original completo
   const [fileError, setFileError] = useState<string | null>(null);
   const [isSuggestingCriteria, setIsSuggestingCriteria] = useState(false);
   
@@ -56,6 +57,10 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
       try {
         const text = e.target?.result as string;
         if (!text) throw new Error("File is empty.");
+        
+        // Guardar el JSON original completo
+        const jsonData = JSON.parse(text);
+        setOriginalN8nJson(jsonData);
         
         const parsedNodes = parseN8nWorkflow(text);
         const newWorkflow: WorkflowNode[] = parsedNodes.map(node => {
@@ -158,7 +163,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           }
         })
       };
-      onStartAudit({ config, n8nData: parsedN8nData });
+      onStartAudit({ config, n8nData: parsedN8nData, n8nJson: originalN8nJson });
     }
   };
 

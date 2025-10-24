@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Chat } from "@google/genai";
-import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent } from '../types';
+import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult, ImprovementData, WorkflowNode, TraceEvent, ParsedN8nNode } from '../types';
 import N8nService from './n8nService';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
@@ -556,4 +556,95 @@ export const runImprovementCycle = async (
         total: originalTestCases.length
     });
     onComplete({ improvedWorkflow, explanation, newResults });
+};
+
+/**
+ * Genera el JSON completo de n8n con los prompts mejorados
+ * @param originalN8nJson - JSON original importado de n8n
+ * @param improvedWorkflow - Workflow con prompts mejorados
+ * @returns JSON de n8n listo para descargar e importar
+ */
+export const generateImprovedN8nJson = (
+    originalN8nJson: any,
+    improvedWorkflow: WorkflowNode[]
+): any => {
+    if (!originalN8nJson) {
+        return null;
+    }
+
+    // Clonar el JSON original
+    const improvedJson = JSON.parse(JSON.stringify(originalN8nJson));
+    
+    // Crear un mapa de system prompts mejorados por node id
+    const promptsMap = new Map<string, string>();
+    improvedWorkflow.forEach(node => {
+        if (node.type === 'agent') {
+            promptsMap.set(node.id, node.systemPrompt);
+        }
+    });
+
+    // Actualizar los nodos en el JSON de n8n
+    if (improvedJson.nodes && Array.isArray(improvedJson.nodes)) {
+        improvedJson.nodes = improvedJson.nodes.map((node: any) => {
+            // Buscar si este nodo tiene un prompt mejorado
+            const improvedPrompt = promptsMap.get(node.id || node.name);
+            
+            if (improvedPrompt) {
+                // Actualizar el system prompt en diferentes tipos de nodos de IA
+                const updatedNode = { ...node };
+                
+                // Para nodos de agentes AI (@n8n/n8n-nodes-langchain.agent, etc.)
+                if (node.parameters) {
+                    // Buscar el campo de system message
+                    if (node.parameters.systemMessage !== undefined) {
+                        updatedNode.parameters = {
+                            ...node.parameters,
+                            systemMessage: improvedPrompt
+                        };
+                    }
+                    // Para nodos de chat
+                    else if (node.parameters.options?.systemMessage !== undefined) {
+                        updatedNode.parameters = {
+                            ...node.parameters,
+                            options: {
+                                ...node.parameters.options,
+                                systemMessage: improvedPrompt
+                            }
+                        };
+                    }
+                    // Para nodos de prompt template
+                    else if (node.parameters.text !== undefined) {
+                        updatedNode.parameters = {
+                            ...node.parameters,
+                            text: improvedPrompt
+                        };
+                    }
+                    // Para nodos personalizados con 'prompt' field
+                    else if (node.parameters.prompt !== undefined) {
+                        updatedNode.parameters = {
+                            ...node.parameters,
+                            prompt: improvedPrompt
+                        };
+                    }
+                }
+                
+                return updatedNode;
+            }
+            
+            return node;
+        });
+    }
+
+    // Actualizar metadatos
+    if (improvedJson.name) {
+        improvedJson.name = `${improvedJson.name} (Optimizado)`;
+    }
+    
+    // Agregar nota de mejora
+    if (!improvedJson.settings) {
+        improvedJson.settings = {};
+    }
+    improvedJson.settings.executionOrder = improvedJson.settings.executionOrder || 'v1';
+    
+    return improvedJson;
 };
