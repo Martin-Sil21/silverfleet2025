@@ -7,8 +7,25 @@ export enum AuditStatus {
   IMPROVEMENT_REPORT_READY = 'IMPROVEMENT_REPORT_READY',
 }
 
+export interface AgentNode {
+  type: 'agent';
+  id: string; // n8n node id or generated id
+  name: string;
+  systemPrompt: string;
+}
+
+export interface ToolNode {
+  type: 'tool';
+  id: string; // n8n node id or generated id
+  name: string;
+  nodeType: string; // The original n8n node type
+  simulatedOutput: string;
+}
+
+export type WorkflowNode = AgentNode | ToolNode;
+
 export interface AuditConfig {
-  systemPrompts: string[];
+  workflow: WorkflowNode[];
   criteria: string[];
   testCaseCount: number;
 }
@@ -45,14 +62,16 @@ export interface AuditResult {
 }
 
 export interface ImprovementData {
-  improvedPrompts: string[];
+  improvedWorkflow: WorkflowNode[];
   explanation: string;
   newResults: AuditResult[];
 }
 
-export interface N8nAgentConfig {
+// Data structure returned directly from the n8n parser
+export interface ParsedN8nNode {
   id: string;
   name: string;
-  type: string;
-  systemPrompt: string;
+  type: string; // n8n node type, e.g., "n8n-nodes-base.set"
+  nodeType: 'agent' | 'tool';
+  systemPrompt?: string;
 }

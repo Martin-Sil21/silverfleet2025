@@ -1,6 +1,5 @@
-
 import React, { useState, useCallback } from 'react';
-import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type N8nAgentConfig } from './types';
+import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nNode, type WorkflowNode } from './types';
 import AgentConfig from './components/AgentConfig';
 import AuditProgress from './components/AuditProgress';
 import AuditReport from './components/AuditReport';
@@ -16,15 +15,15 @@ const App: React.FC = () => {
   const [auditResults, setAuditResults] = useState<AuditResult[]>([]);
   const [originalAuditResults, setOriginalAuditResults] = useState<AuditResult[]>([]);
   const [improvementData, setImprovementData] = useState<ImprovementData | null>(null);
-  const [n8nAgentData, setN8nAgentData] = useState<N8nAgentConfig[] | null>(null);
+  const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nNode[] | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const { t, language } = useTranslation();
 
-  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: N8nAgentConfig[] | null }) => {
+  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => {
     setAuditStatus(AuditStatus.AUDITING);
     setAuditConfig(data.config);
-    setN8nAgentData(data.n8nData);
+    setN8nNodeData(data.n8nData);
     setErrorMessage('');
     setImprovementData(null);
     try {
@@ -66,7 +65,7 @@ const App: React.FC = () => {
     setAuditResults([]);
     setOriginalAuditResults([]);
     setImprovementData(null);
-    setN8nAgentData(null);
+    setN8nNodeData(null);
     setProgressMessage('');
     setErrorMessage('');
   };
@@ -92,8 +91,8 @@ const App: React.FC = () => {
                   originalResults={originalAuditResults} 
                   improvementData={improvementData} 
                   onReset={handleReset} 
-                  originalPrompts={auditConfig.systemPrompts}
-                  n8nData={n8nAgentData}
+                  originalWorkflow={auditConfig.workflow}
+                  n8nData={n8nNodeData}
                />;
       case AuditStatus.ERROR:
          return (

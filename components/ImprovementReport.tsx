@@ -1,6 +1,5 @@
-
 import React, { useMemo, useState } from 'react';
-import type { AuditResult, ImprovementData, N8nAgentConfig } from '../types';
+import type { AuditResult, ImprovementData, ParsedN8nNode, WorkflowNode } from '../types';
 import Card from './Card';
 import { ArrowRightIcon } from './icons/ArrowRightIcon';
 import { ClipboardIcon } from './icons/ClipboardIcon';
@@ -29,19 +28,23 @@ const ScoreComparison: React.FC<{ oldScore: number, newScore: number }> = ({ old
     );
 };
 
-const PromptComparisonCard: React.FC<{ index: number, oldPrompt: string, newPrompt: string, agentName?: string }> = ({ index, oldPrompt, newPrompt, agentName }) => {
+const PromptComparisonCard: React.FC<{ oldNode: WorkflowNode, newNode: WorkflowNode }> = ({ oldNode, newNode }) => {
     const { t } = useTranslation();
     const [copyText, setCopyText] = useState(t('copyNewPrompt'));
 
+    if (oldNode.type !== 'agent' || newNode.type !== 'agent') {
+      return null;
+    }
+
     const handleCopy = () => {
-        navigator.clipboard.writeText(newPrompt);
+        navigator.clipboard.writeText(newNode.systemPrompt);
         setCopyText(t('copied'));
         setTimeout(() => setCopyText(t('copyNewPrompt')), 2000);
     };
     
-    const hasChanged = oldPrompt !== newPrompt;
+    const hasChanged = oldNode.systemPrompt !== newNode.systemPrompt;
     
-    const agentTitle = agentName ? t('agentNameLabel', { index: index + 1, name: agentName }) : t('agentLabel', { index: index + 1 });
+    const agentTitle = t('agentNameLabel', { name: oldNode.name });
 
     return (
         <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -57,11 +60,11 @@ const PromptComparisonCard: React.FC<{ index: number, oldPrompt: string, newProm
              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                     <h5 className="font-semibold mb-1 text-sm text-gray-600 dark:text-gray-400">{t('originalPrompt')}</h5>
-                    <textarea readOnly value={oldPrompt} className="w-full h-40 p-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md text-xs" />
+                    <textarea readOnly value={oldNode.systemPrompt} className="w-full h-40 p-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md text-xs" />
                 </div>
                 <div>
                     <h5 className="font-semibold mb-1 text-sm text-gray-600 dark:text-gray-400">{t('improvedPrompt')}</h5>
-                    <textarea readOnly value={newPrompt} className={`w-full h-40 p-2 border rounded-md text-xs ${hasChanged ? 'bg-green-50 dark:bg-green-900/50 border-green-300 dark:border-green-700' : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600'}`} />
+                    <textarea readOnly value={newNode.systemPrompt} className={`w-full h-40 p-2 border rounded-md text-xs ${hasChanged ? 'bg-green-50 dark:bg-green-900/50 border-green-300 dark:border-green-700' : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600'}`} />
                 </div>
             </div>
         </div>
@@ -73,13 +76,13 @@ interface ImprovementReportProps {
     originalResults: AuditResult[];
     improvementData: ImprovementData;
     onReset: () => void;
-    originalPrompts: string[];
-    n8nData: N8nAgentConfig[] | null;
+    originalWorkflow: WorkflowNode[];
+    n8nData: ParsedN8nNode[] | null;
 }
 
-const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, improvementData, onReset, originalPrompts, n8nData }) => {
+const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, improvementData, onReset, originalWorkflow, n8nData }) => {
     const { t } = useTranslation();
-    const { improvedPrompts, explanation, newResults } = improvementData;
+    const { improvedWorkflow, explanation, newResults } = improvementData;
 
     const overallScores = useMemo(() => {
         const oldTotal = originalResults.reduce((sum, r) => sum + r.analysis.overallScore, 0);
@@ -94,12 +97,20 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
         if (!n8nData) return;
         
         const dataToDownload = {
-            agentsToUpdate: n8nData.map((agent, index) => ({
-                nodeName: agent.name,
-                nodeId: agent.id,
-                originalPrompt: originalPrompts[index],
-                improvedPrompt: improvedPrompts[index],
-            })),
+            agentsToUpdate: improvedWorkflow
+                .filter(node => node.type === 'agent')
+                .map(improvedNode => {
+                    const originalNode = originalWorkflow.find(n => n.id === improvedNode.id);
+                    if (!originalNode || originalNode.type !== 'agent' || improvedNode.type !== 'agent') return null;
+                    
+                    return {
+                        nodeName: originalNode.name,
+                        nodeId: originalNode.id,
+                        originalPrompt: originalNode.systemPrompt,
+                        improvedPrompt: improvedNode.systemPrompt,
+                    }
+                })
+                .filter(Boolean),
         };
 
         const jsonString = JSON.stringify(dataToDownload, null, 2);
@@ -148,15 +159,17 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
                     )}
                 </div>
                 <div className="space-y-4">
-                    {originalPrompts.map((prompt, index) => (
-                        <PromptComparisonCard 
-                            key={index}
-                            index={index}
-                            oldPrompt={prompt}
-                            newPrompt={improvedPrompts[index]}
-                            agentName={n8nData?.[index]?.name}
-                        />
-                    ))}
+                    {originalWorkflow.map((node, index) => {
+                         const improvedNode = improvedWorkflow[index];
+                         if (node.type === 'agent' && improvedNode) {
+                             return <PromptComparisonCard 
+                                 key={node.id}
+                                 oldNode={node}
+                                 newNode={improvedNode}
+                             />
+                         }
+                         return null;
+                    })}
                 </div>
             </Card>
             

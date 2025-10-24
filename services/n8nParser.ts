@@ -1,4 +1,4 @@
-import type { N8nAgentConfig } from '../types';
+import type { ParsedN8nNode } from '../types';
 
 interface N8nNode {
   parameters: Record<string, any>;
@@ -9,23 +9,20 @@ interface N8nNode {
 }
 
 interface N8nConnection {
-    source: {
-        node: string;
-    };
-    target: {
-        node: string;
-    };
+    sourceNodeId: string;
+    targetNodeId: string;
 }
 
 interface N8nWorkflow {
   nodes: N8nNode[];
-  connections: Record<string, any>; // It's an object, not an array
+  connections: N8nConnection[];
 }
 
 const getSystemPromptFromNode = (parameters: Record<string, any>): string | undefined => {
     if (!parameters) return undefined;
     
-    const possibleKeys = ['systemInstruction', 'systemMessage', 'system_prompt', 'prompt'];
+    // Most common keys first
+    const possibleKeys = ['systemMessage', 'system_prompt', 'systemInstruction', 'prompt'];
 
     for (const key of possibleKeys) {
         if (typeof parameters[key] === 'string' && parameters[key].trim() !== '') {
@@ -57,11 +54,11 @@ const getSystemPromptFromNode = (parameters: Record<string, any>): string | unde
     return undefined;
 }
 
-const topologicalSort = (nodes: N8nAgentConfig[], connections: N8nConnection[]): N8nAgentConfig[] => {
-    const sorted: N8nAgentConfig[] = [];
+const topologicalSort = (nodes: ParsedN8nNode[], connections: N8nConnection[]): ParsedN8nNode[] => {
+    const sorted: ParsedN8nNode[] = [];
     const inDegree: { [key: string]: number } = {};
     const adjList: { [key: string]: string[] } = {};
-    const nodeMap: { [key: string]: N8nAgentConfig } = {};
+    const nodeMap: { [key: string]: ParsedN8nNode } = {};
 
     nodes.forEach(node => {
         inDegree[node.id] = 0;
@@ -70,10 +67,9 @@ const topologicalSort = (nodes: N8nAgentConfig[], connections: N8nConnection[]):
     });
 
     connections.forEach(conn => {
-        // Ensure both source and target are agent nodes before processing
-        if (adjList[conn.source.node] !== undefined && adjList[conn.target.node] !== undefined) {
-            adjList[conn.source.node].push(conn.target.node);
-            inDegree[conn.target.node]++;
+        if (adjList[conn.sourceNodeId] !== undefined && adjList[conn.targetNodeId] !== undefined) {
+            adjList[conn.sourceNodeId].push(conn.targetNodeId);
+            inDegree[conn.targetNodeId]++;
         }
     });
 
@@ -94,15 +90,45 @@ const topologicalSort = (nodes: N8nAgentConfig[], connections: N8nConnection[]):
         }
     }
     
-    // If a cycle is detected, or not all nodes are sorted, fallback to original order
     if (sorted.length !== nodes.length) {
+        console.warn("Cycle detected in graph or disconnected components; returning original node order.");
         return nodes; 
     }
 
     return sorted;
 };
 
-export const parseN8nWorkflow = (jsonContent: string): N8nAgentConfig[] => {
+const transformConnections = (n8nConnections: Record<string, any>, nodes: N8nNode[]): N8nConnection[] => {
+    const connections: N8nConnection[] = [];
+    const idToNodeMap = new Map<string, N8nNode>(nodes.map(n => [n.id, n]));
+
+    for (const sourceId in n8nConnections) {
+        if (!Object.prototype.hasOwnProperty.call(n8nConnections, sourceId)) continue;
+        
+        const sourceNode = idToNodeMap.get(sourceId);
+        if (!sourceNode) continue;
+
+        const outputs = n8nConnections[sourceId];
+        for (const outputType in outputs) {
+            if (!Object.prototype.hasOwnProperty.call(outputs, outputType)) continue;
+            
+            const targetGroups = outputs[outputType];
+            if (Array.isArray(targetGroups)) {
+                for (const group of targetGroups) {
+                     if(group.id) { // This is the new format
+                        const targetNode = idToNodeMap.get(group.id);
+                        if (targetNode) {
+                            connections.push({ sourceNodeId: sourceNode.id, targetNodeId: targetNode.id });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return connections;
+};
+
+export const parseN8nWorkflow = (jsonContent: string): ParsedN8nNode[] => {
   try {
     const workflow: N8nWorkflow = JSON.parse(jsonContent);
 
@@ -110,74 +136,43 @@ export const parseN8nWorkflow = (jsonContent: string): N8nAgentConfig[] => {
       throw new Error("Invalid n8n workflow structure. 'nodes' or 'connections' not found.");
     }
 
-    const aiAgents: N8nAgentConfig[] = workflow.nodes
-      .map((node, index) => {
-        const systemPrompt = getSystemPromptFromNode(node.parameters);
-        if (systemPrompt) {
-          return {
-            id: node.id,
-            name: node.name || `Unnamed Agent Node ${index + 1}`,
-            type: node.type,
-            systemPrompt: systemPrompt,
-          };
-        }
-        return null;
-      })
-      .filter((agent): agent is N8nAgentConfig => agent !== null);
-      
-    if (aiAgents.length === 0) {
-        throw new Error("No AI agent nodes with a recognizable system prompt were found in the workflow.");
-    }
-
-    if (aiAgents.length <= 1) {
-        return aiAgents;
-    }
-
-    // Transform the n8n connections object into an array for sorting
-    const nameToIdMap = new Map<string, string>();
-    workflow.nodes.forEach(node => nameToIdMap.set(node.name, node.id));
-
-    const connectionsArray: N8nConnection[] = [];
-    const connectionsObject = workflow.connections;
-
-    for (const sourceNodeName in connectionsObject) {
-      if (!Object.prototype.hasOwnProperty.call(connectionsObject, sourceNodeName)) continue;
-
-      const sourceNodeId = nameToIdMap.get(sourceNodeName);
-      if (!sourceNodeId) continue;
-
-      const outputs = connectionsObject[sourceNodeName];
-      for (const outputType in outputs) {
-        if (!Object.prototype.hasOwnProperty.call(outputs, outputType)) continue;
-
-        const targetGroups = outputs[outputType];
-        if (Array.isArray(targetGroups)) {
-          for (const group of targetGroups) {
-            if (Array.isArray(group)) {
-              for (const target of group) {
-                if (target && target.node) {
-                  const targetNodeId = nameToIdMap.get(target.node);
-                  if (targetNodeId) {
-                    connectionsArray.push({
-                      source: { node: sourceNodeId },
-                      target: { node: targetNodeId },
-                    });
-                  }
-                }
-              }
-            }
-          }
-        }
+    const allNodes: ParsedN8nNode[] = workflow.nodes.map((node) => {
+      const systemPrompt = getSystemPromptFromNode(node.parameters);
+      if (systemPrompt) {
+        return {
+          id: node.id,
+          name: node.name || `Unnamed Agent Node`,
+          type: node.type,
+          nodeType: 'agent',
+          systemPrompt,
+        };
       }
+      return {
+        id: node.id,
+        name: node.name || `Unnamed Tool Node`,
+        type: node.type,
+        nodeType: 'tool',
+      };
+    });
+      
+    if (allNodes.length === 0) {
+        throw new Error("No nodes were found in the workflow.");
     }
-
-    const sortedAgents = topologicalSort(aiAgents, connectionsArray);
-    return sortedAgents;
+    
+    if (allNodes.length === 1) {
+        return allNodes;
+    }
+    
+    const connections = transformConnections(workflow.connections as any, workflow.nodes);
+    
+    const sortedNodes = topologicalSort(allNodes, connections);
+    return sortedNodes;
 
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error("Failed to parse the file. Please ensure it's a valid JSON file.");
     }
+    console.error("n8n Parsing Error:", error);
     throw error;
   }
 };
