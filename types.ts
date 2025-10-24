@@ -84,6 +84,7 @@ export interface ImprovementData {
   improvedWorkflow: WorkflowNode[];
   explanation: string;
   newResults: AuditResult[];
+  improvedN8nJson?: any; // JSON completo de n8n mejorado para descargar
 }
 
 // Data structure returned directly from the n8n parser
