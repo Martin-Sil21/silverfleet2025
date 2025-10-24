@@ -334,6 +334,7 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], language: s
 
 /**
  * Execute a test case using real n8n workflow execution via webhook
+ * Uses backend proxy to avoid CORS issues
  */
 const runTestCaseWithN8nWebhook = async (
     webhookUrl: string,
@@ -342,6 +343,9 @@ const runTestCaseWithN8nWebhook = async (
     const conversation: ConversationTurn[] = [];
     const fullTrace: TraceEvent[] = [];
     let stepCounter = 0;
+
+    // URL del backend proxy (localhost en desarrollo, producción en deploy)
+    const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 
     for (const [turnIndex, userPrompt] of testCase.prompts.entries()) {
         conversation.push({ author: 'user', message: userPrompt });
@@ -358,25 +362,35 @@ const runTestCaseWithN8nWebhook = async (
         });
 
         try {
-            // Llamar al webhook de n8n
-            const response = await fetch(webhookUrl, {
+            // Llamar al webhook de n8n a través del backend proxy
+            const response = await fetch(`${BACKEND_URL}/api/n8n/webhook`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    userPrompt,
-                    testCaseId: testCase.id,
-                    testCaseTitle: testCase.title,
-                    turn: turnIndex,
+                    webhookUrl: webhookUrl,
+                    data: {
+                        userPrompt,
+                        testCaseId: testCase.id,
+                        testCaseTitle: testCase.title,
+                        turn: turnIndex,
+                    }
                 }),
             });
 
             if (!response.ok) {
-                throw new Error(`Webhook responded with status ${response.status}`);
+                const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(errorData.error || `Backend proxy error: ${response.status}`);
             }
 
-            const result = await response.json();
+            const proxyResult = await response.json();
+            
+            if (!proxyResult.success) {
+                throw new Error(proxyResult.error || 'n8n webhook execution failed');
+            }
+
+            const result = proxyResult.data;
             
             // Agregar traza del webhook
             fullTrace.push({
@@ -386,7 +400,7 @@ const runTestCaseWithN8nWebhook = async (
                 nodeName: 'n8n Workflow',
                 nodeType: 'tool',
                 eventType: 'OUTPUT',
-                content: JSON.stringify(result, null, 2),
+                content: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
             });
 
             // Extraer la respuesta
