@@ -1,5 +1,5 @@
 {
-  "name": "AI Agent Auditor",
+  "name": "Silver Fleet",
   "description": "A professional system to audit AI agents by generating conversational test cases, executing them, and analyzing the results for compliance, context retention, and human-like interaction.",
   "requestFramePermissions": []
 }

@@ -2,21 +2,11 @@
 import { GoogleGenAI, Type, Chat } from "@google/genai";
 import type { AuditConfig, TestCase, ConversationTurn, Analysis, AuditResult } from './types';
 
-// This function should be placed in a real app in a secure environment
-// For this example, we assume process.env.API_KEY is available.
-const getApiKey = () => {
-    const key = process.env.API_KEY;
-    if (!key) {
-        throw new Error("API_KEY environment variable not set.");
-    }
-    return key;
-};
-
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-const API_CALL_DELAY_MS = 1500; // 1.5 second delay between calls to avoid rate limiting.
+const API_CALL_DELAY_MS = 2500; // 2.5 second delay between calls to avoid rate limiting.
 
 const generateTestCases = async (config: AuditConfig): Promise<TestCase[]> => {
-    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const { systemPrompts, criteria, testCaseCount } = config;
 
     const prompt = `
@@ -68,7 +58,7 @@ const generateTestCases = async (config: AuditConfig): Promise<TestCase[]> => {
 
 const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): Promise<ConversationTurn[]> => {
     const conversation: ConversationTurn[] = [];
-    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     for (const [index, userPrompt] of testCase.prompts.entries()) {
         // Delay between each conversational turn from the user.
@@ -101,7 +91,7 @@ const runChainedTestCase = async (systemPrompts: string[], testCase: TestCase): 
 
 
 const analyzeConversation = async (systemPrompts: string[], criteria: string[], conversation: ConversationTurn[]): Promise<Analysis> => {
-    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const prompt = `
     As an expert AI auditor, analyze the following conversation which was handled by a chain of AI agents.
@@ -158,7 +148,7 @@ const analyzeConversation = async (systemPrompts: string[], criteria: string[], 
 };
 
 const improveSystemPrompt = async (config: AuditConfig, results: AuditResult[]): Promise<{ improvedPrompt: string, explanation: string }> => {
-    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const analysisSummary = results.map(r => ({
         test: r.testCase.title,
@@ -237,6 +227,10 @@ export const runAuditOnTestCases = async (
             conversation,
             analysis,
         });
+        
+        if (i < testCases.length - 1) {
+            await delay(API_CALL_DELAY_MS);
+        }
     }
     return results;
 }
