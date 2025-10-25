@@ -1,63 +1,44 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import Loader from './Loader';
-import Card from './Card';
 import { useTranslation } from '../hooks/useTranslation';
 
 interface AuditProgressProps {
   message: string;
-  title: string;
-  progress?: { current: number; total: number };
-  logs: string[];
+  totalCases: number;
+  completedCases: number;
+  onCancel: () => void;
 }
 
-const AuditProgress: React.FC<AuditProgressProps> = ({ message, title, progress, logs }) => {
+const AuditProgress: React.FC<AuditProgressProps> = ({ message, totalCases, completedCases, onCancel }) => {
   const { t } = useTranslation();
-  const percentage = progress && progress.total > 0
-    ? Math.round((progress.current / progress.total) * 100)
-    : 0;
-  
-  const logContainerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-    }
-  }, [logs]);
+  const progressPercentage = totalCases > 0 ? (completedCases / totalCases) * 100 : 0;
 
   return (
-    <Card>
-      <div className="flex flex-col items-center justify-center p-8 space-y-6">
-        <Loader />
-        <h2 className="text-xl font-semibold text-gray-800 dark:text-white">{title}</h2>
-        <div className="w-full max-w-2xl text-center">
-            <p className="text-gray-600 dark:text-gray-400 font-medium h-6">{message}</p>
-            {progress && progress.total > 0 && (
-              <div className="mt-4">
-                <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
-                  <div 
-                    className="bg-primary-600 h-2.5 rounded-full transition-all duration-500 ease-out" 
-                    style={{ width: `${percentage}%` }}
-                  ></div>
-                </div>
-                <p className="text-sm font-semibold text-gray-500 dark:text-gray-400 mt-2">
-                  {percentage}% ({progress.current} / {progress.total})
-                </p>
-              </div>
-            )}
-            <div className="mt-6 text-left">
-                <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-2">{t('activityLog')}</h3>
-                <div 
-                    ref={logContainerRef}
-                    className="h-48 max-h-48 overflow-y-auto bg-gray-900 text-gray-300 p-3 rounded-lg font-mono text-xs"
-                >
-                    {logs.map((log, index) => (
-                        <p key={index} className="whitespace-pre-wrap leading-relaxed">&raquo; {log}</p>
-                    ))}
-                </div>
-            </div>
+    <div className="w-full h-full flex flex-col items-center justify-center bg-gray-100 dark:bg-gray-900 p-8 text-center">
+      <Loader />
+      <h2 className="text-2xl font-bold text-gray-800 dark:text-white mt-6 mb-2">{t('auditInProgress')}</h2>
+      <p className="text-gray-600 dark:text-gray-400 mb-6 max-w-md">{message}</p>
+      
+      <div className="w-full max-w-md">
+        <div className="flex justify-between items-center mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">
+          <span>{t('progress')}</span>
+          <span>{completedCases} / {totalCases}</span>
+        </div>
+        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+          <div 
+            className="bg-primary-600 h-2.5 rounded-full transition-all duration-500" 
+            style={{ width: `${progressPercentage}%` }}
+          ></div>
         </div>
       </div>
-    </Card>
+      
+      <button 
+        onClick={onCancel} 
+        className="mt-8 px-6 py-2 bg-gray-600 text-white font-semibold rounded-lg shadow-md hover:bg-gray-700 transition-colors"
+      >
+        {t('cancelAudit')}
+      </button>
+    </div>
   );
 };
 

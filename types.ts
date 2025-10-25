@@ -12,6 +12,7 @@ export interface AgentNode {
   id: string; // n8n node id or generated id
   name: string;
   systemPrompt: string;
+  parameters: Record<string, any>;
 }
 
 export interface ToolNode {
@@ -19,35 +20,33 @@ export interface ToolNode {
   id: string; // n8n node id or generated id
   name: string;
   nodeType: string; // The original n8n node type
+  parameters: Record<string, any>;
 }
 
 export type WorkflowNode = AgentNode | ToolNode;
 
-export interface N8nConfig {
-  webhookUrl?: string; // URL del webhook de n8n (ej: https://silverfleet.online/webhook/xxx)
-  baseUrl?: string; // Solo si usas API: "https://your-n8n.com"
-  apiKey?: string; // Solo si usas API
-  workflowId?: string; // Solo si usas API: ID del workflow a auditar
+export interface N8nConnection {
+  sourceNodeId: string;
+  targetNodeId: string;
+  sourceHandle: string;
 }
 
 export interface AuditConfig {
   workflow: WorkflowNode[];
+  connections: N8nConnection[];
   criteria: string[];
   testCaseCount: number;
-  n8nConfig?: N8nConfig; // Configuración para ejecuciones reales en n8n
-  useRealExecution?: boolean; // Si true, ejecuta en n8n real. Si false, usa simulación IA
+  samplePayload: Record<string, any>;
+  auditType: 'visual' | 'real';
+  endpointUrl?: string;
 }
 
 export interface TestCase {
   id: string;
   title: string;
-  scenario: string;
-  prompts: string[];
-}
-
-export interface ConversationTurn {
-  author: 'user' | 'agent';
-  message: string;
+  persona: string;
+  conversationGoal: string;
+  initialPayload: Record<string, any>;
 }
 
 export interface CriterionAnalysis {
@@ -62,30 +61,31 @@ export interface Analysis {
   criteriaBreakdown: CriterionAnalysis[];
 }
 
-export interface TraceEvent {
-  step: number;
-  turn: number;
+export interface ExecutionStep {
+  // Can be nodeId for visual audit, or "Turn 1", "Turn 2" for real audit.
   nodeId: string;
-  nodeName: string;
-  nodeType: 'agent' | 'tool' | 'user';
-  eventType: 'INPUT' | 'OUTPUT';
-  content: string;
+  status: 'SUCCESS' | 'ERROR' | 'PENDING' | 'RUNNING';
+  // For visual, this is node input. For real, this is user message.
+  input: any;
+  // For visual, this is node output. For real, this is agent response.
+  output: any;
+  log: string;
+  durationMs: number;
 }
 
 
 export interface AuditResult {
   id: string;
   testCase: TestCase;
-  conversation: ConversationTurn[];
+  executionTrace: ExecutionStep[];
   analysis: Analysis;
-  fullTrace: TraceEvent[];
+  finalStatus: 'SUCCESS' | 'ERROR';
 }
 
 export interface ImprovementData {
   improvedWorkflow: WorkflowNode[];
   explanation: string;
   newResults: AuditResult[];
-  improvedN8nJson?: any; // JSON completo de n8n mejorado para descargar
 }
 
 // Data structure returned directly from the n8n parser
@@ -95,4 +95,12 @@ export interface ParsedN8nNode {
   type: string; // n8n node type, e.g., "n8n-nodes-base.set"
   nodeType: 'agent' | 'tool';
   systemPrompt?: string;
+  parameters: Record<string, any>;
+  position: { x: number, y: number };
+}
+
+export interface ParsedN8nWorkflow {
+  nodes: ParsedN8nNode[];
+  connections: N8nConnection[];
+  detectedEndpoints?: string[];
 }

@@ -1,11 +1,10 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import type { AuditResult, ConversationTurn, CriterionAnalysis, AuditConfig } from '../types';
+import React, { useState, useMemo } from 'react';
+import type { AuditResult, CriterionAnalysis, AuditConfig, ExecutionStep } from '../types';
 import Card from './Card';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
 import { XCircleIcon } from './icons/XCircleIcon';
 import { ExclamationTriangleIcon } from './icons/ExclamationTriangleIcon';
 import { useTranslation } from '../hooks/useTranslation';
-import VisualTracePlayer from './VisualTracePlayer';
 
 interface AuditReportProps {
   results: AuditResult[];
@@ -27,31 +26,88 @@ const ScoreIndicator: React.FC<{ score: number }> = ({ score }) => {
   }, [score]);
   
   const bgColor = useMemo(() => {
-    if (score >= 8) return 'bg-green-100 dark:bg-green-900';
-    if (score >= 5) return 'bg-yellow-100 dark:bg-yellow-900';
-    return 'bg-red-100 dark:bg-red-900';
+    if (score >= 8) return 'bg-green-100 dark:bg-green-900/50';
+    if (score >= 5) return 'bg-yellow-100 dark:bg-yellow-900/50';
+    return 'bg-red-100 dark:bg-red-900/50';
   }, [score]);
 
 
   return (
     <div className={`flex items-center justify-center w-16 h-16 rounded-full ${bgColor} ${scoreColor}`}>
-        <span className="text-2xl font-bold">{score}</span>
+        <span className="text-2xl font-bold">{score.toFixed(1)}</span>
     </div>
   );
 };
 
-const ConversationLog: React.FC<{ conversation: ConversationTurn[] }> = ({ conversation }) => {
+const NodeTraceViewer: React.FC<{ trace: ExecutionStep[], config: AuditConfig }> = ({ trace, config }) => {
+  const { t } = useTranslation();
   return (
-    <div className="mt-4 space-y-4 max-h-96 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      {conversation.map((turn, index) => (
-        <div key={index} className={`flex ${turn.author === 'user' ? 'justify-end' : 'justify-start'}`}>
-          <div className={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-xl ${turn.author === 'user' ? 'bg-primary-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200'}`}>
-            <p className="text-sm">{turn.message}</p>
-          </div>
-        </div>
-      ))}
+    <div className="mt-4 space-y-2 max-h-[500px] overflow-y-auto p-4 bg-gray-900 rounded-lg border border-gray-700 font-mono text-xs">
+      {trace.map(step => {
+        const node = config.workflow.find(n => n.id === step.nodeId);
+        const statusColor = step.status === 'SUCCESS' ? 'text-green-400' : step.status === 'ERROR' ? 'text-red-400' : 'text-yellow-400';
+        return (
+          <details key={step.nodeId} className="p-2 bg-gray-800/50 rounded-md">
+            <summary className="cursor-pointer font-semibold flex justify-between items-center">
+              <span>Node: {node?.name || step.nodeId}</span>
+              <span className={statusColor}>{step.status} ({step.durationMs}ms)</span>
+            </summary>
+            <div className="mt-2 pl-4 border-l border-gray-600">
+                <h5 className="font-semibold text-gray-300 mt-2">{t('inputData')}</h5>
+                <pre className="whitespace-pre-wrap text-gray-400">{JSON.stringify(step.input, null, 2)}</pre>
+                <h5 className="font-semibold text-gray-300 mt-2">{t('outputData')}</h5>
+                <pre className="whitespace-pre-wrap text-cyan-400">{JSON.stringify(step.output, null, 2)}</pre>
+                 {step.log && (
+                    <>
+                    <h5 className="font-semibold text-gray-300 mt-2">{t('executionLogTitle')}</h5>
+                    <pre className="whitespace-pre-wrap text-gray-400">{step.log}</pre>
+                    </>
+                 )}
+            </div>
+          </details>
+        )
+      })}
     </div>
   );
+};
+
+const ConversationTraceViewer: React.FC<{ trace: ExecutionStep[] }> = ({ trace }) => {
+    const { t } = useTranslation();
+    
+    // Find a message key in the user input.
+    const findMessage = (data: any): string => {
+        if (!data || typeof data !== 'object') return JSON.stringify(data);
+        const messageKey = Object.keys(data).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query'));
+        return messageKey ? data[messageKey] : JSON.stringify(data);
+    };
+
+    return (
+        <div className="mt-4 space-y-4 max-h-[500px] overflow-y-auto p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+            {trace.map(turn => (
+                <div key={turn.nodeId}>
+                    <div className="flex justify-end">
+                        <div className="bg-primary-500 text-white p-3 rounded-lg max-w-xs md:max-w-md">
+                            <p className="text-sm font-bold mb-1">{t('userTurnTitle', { turn: turn.nodeId.split(' ')[1] })}</p>
+                            <p className="text-sm">{findMessage(turn.input)}</p>
+                        </div>
+                    </div>
+                    <div className="flex justify-start mt-2">
+                        <div className="bg-white dark:bg-gray-700 p-3 rounded-lg max-w-xs md:max-w-md shadow">
+                             <p className="text-sm font-bold mb-1 text-gray-700 dark:text-gray-300">{t('agentResponseTitle')}</p>
+                             {turn.status === 'SUCCESS' ? (
+                                 <pre className="text-xs whitespace-pre-wrap text-gray-800 dark:text-gray-200">{JSON.stringify(turn.output, null, 2)}</pre>
+                             ) : (
+                                <div className="text-red-500 dark:text-red-400">
+                                    <p className="font-bold">{t('error')}</p>
+                                    <p className="text-xs">{turn.log}</p>
+                                </div>
+                             )}
+                        </div>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
 };
 
 const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analysis }) => (
@@ -69,10 +125,11 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 );
 
 
-const ReportCard: React.FC<{ result: AuditResult, workflow: AuditConfig['workflow'] }> = ({ result, workflow }) => {
-  const [isLogVisible, setIsLogVisible] = useState(false);
+const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ result, config }) => {
   const [isTraceVisible, setIsTraceVisible] = useState(false);
   const { t } = useTranslation();
+  const traceTitle = config.auditType === 'real' ? t('showConversationLog') : t('showNodeLog');
+  const hideTraceTitle = config.auditType === 'real' ? t('hideConversationLog') : t('hideNodeLog');
 
   return (
     <Card className="mb-6">
@@ -82,7 +139,7 @@ const ReportCard: React.FC<{ result: AuditResult, workflow: AuditConfig['workflo
         </div>
         <div className="flex-grow">
           <h3 className="text-xl font-bold text-gray-800 dark:text-white">{result.testCase.title}</h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{result.testCase.scenario}</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t('personaLabel')}: {result.testCase.persona}</p>
           <p className="text-gray-700 dark:text-gray-300">{result.analysis.summary}</p>
           
           <div className="mt-4">
@@ -92,20 +149,17 @@ const ReportCard: React.FC<{ result: AuditResult, workflow: AuditConfig['workflo
 
           <div className="flex items-center gap-4 mt-4">
             <button
-              onClick={() => setIsLogVisible(!isLogVisible)}
-              className="text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
-            >
-              {isLogVisible ? t('hideLog') : t('showLog')}
-            </button>
-            <button
               onClick={() => setIsTraceVisible(!isTraceVisible)}
               className="text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
             >
-              {isTraceVisible ? t('hideVisualTrace') : t('showVisualTrace')}
+              {isTraceVisible ? hideTraceTitle : traceTitle}
             </button>
           </div>
-          {isLogVisible && <ConversationLog conversation={result.conversation} />}
-          {isTraceVisible && <VisualTracePlayer trace={result.fullTrace} workflow={workflow} />}
+          {isTraceVisible && (
+            config.auditType === 'real' 
+              ? <ConversationTraceViewer trace={result.executionTrace} />
+              : <NodeTraceViewer trace={result.executionTrace} config={config} />
+          )}
         </div>
       </div>
     </Card>
@@ -117,18 +171,9 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config }) =
   const overallAverageScore = useMemo(() => {
     if (results.length === 0) return 0;
     const total = results.reduce((sum, r) => sum + r.analysis.overallScore, 0);
-    return parseFloat((total / results.length).toFixed(1));
+    return total / results.length;
   }, [results]);
 
-  const [countdown, setCountdown] = useState(5);
-
-  useEffect(() => {
-    if (countdown <= 0) return;
-    const timer = setTimeout(() => {
-      setCountdown(prev => prev - 1);
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [countdown]);
 
   return (
     <div>
@@ -146,7 +191,7 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config }) =
         </Card>
 
       {results.map((result) => (
-        <ReportCard key={result.id} result={result} workflow={config.workflow} />
+        <ReportCard key={result.id} result={result} config={config} />
       ))}
       
       <div className="text-center mt-8 flex flex-col sm:flex-row justify-center items-center gap-4">
@@ -156,11 +201,12 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config }) =
         >
           {t('runNewAudit')}
         </button>
-        <div className="py-3 px-6 bg-primary-100 dark:bg-primary-900/50 text-primary-700 dark:text-primary-300 font-semibold rounded-lg shadow-md">
-          {countdown > 0 
-              ? t('startingImprovementCycle', { seconds: countdown }) 
-              : t('generatingImprovements')}
-        </div>
+        <button
+          disabled
+          className="py-3 px-6 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105 disabled:bg-primary-400/50 disabled:cursor-not-allowed"
+        >
+          {t('suggestImprovements')}
+        </button>
       </div>
     </div>
   );
