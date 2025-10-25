@@ -160,7 +160,7 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
                 </div>
                 <div className="space-y-4">
                     {originalWorkflow.map((node, index) => {
-                         const improvedNode = improvedWorkflow[index];
+                         const improvedNode = improvedWorkflow.find(n => n.id === node.id);
                          if (node.type === 'agent' && improvedNode) {
                              return <PromptComparisonCard 
                                  key={node.id}
@@ -182,7 +182,8 @@ const ImprovementReport: React.FC<ImprovementReportProps> = ({ originalResults, 
                         return (
                             <div key={origResult.id} className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
                                 <h4 className="font-bold text-lg text-gray-800 dark:text-white">{origResult.testCase.title}</h4>
-                                <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">{origResult.testCase.scenario}</p>
+                                {/* FIX: Property 'scenario' does not exist on type 'TestCase'. Replaced with 'persona' which is available and fits the UI context. */}
+                                <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">{origResult.testCase.persona}</p>
                                 <ScoreComparison oldScore={origResult.analysis.overallScore} newScore={newResult.analysis.overallScore} />
                             </div>
                         );

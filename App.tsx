@@ -1,136 +1,124 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nNode, type WorkflowNode } from './types';
+import React, { useState, useCallback } from 'react';
+import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow } from './types';
 import AgentConfig from './components/AgentConfig';
-import AuditProgress from './components/AuditProgress';
 import AuditReport from './components/AuditReport';
-import { runFullAudit, runImprovementCycle } from './services/geminiService';
+import { runFullAudit } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
 import { useTranslation } from './hooks/useTranslation';
 import LanguageSwitcher from './components/LanguageSwitcher';
+import ExecutionCanvas from './components/ExecutionCanvas';
+import Card from './components/Card';
+import AuditProgress from './components/AuditProgress';
 
 const App: React.FC = () => {
   const [auditStatus, setAuditStatus] = useState<AuditStatus>(AuditStatus.CONFIG);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
   const [auditResults, setAuditResults] = useState<AuditResult[]>([]);
-  const [originalAuditResults, setOriginalAuditResults] = useState<AuditResult[]>([]);
   const [improvementData, setImprovementData] = useState<ImprovementData | null>(null);
-  const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nNode[] | null>(null);
+  const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nWorkflow | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
-  const [progressLogs, setProgressLogs] = useState<string[]>([]);
-  const [progress, setProgress] = useState<{ current: number, total: number }>({ current: 0, total: 0 });
+  const [currentTrace, setCurrentTrace] = useState<AuditResult | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const { t, language } = useTranslation();
 
-  const handleProgressUpdate = (update: { message: string, current?: number, total?: number }) => {
+  const handleProgressUpdate = useCallback((update: { message: string, trace?: AuditResult }) => {
     setProgressMessage(update.message);
-    setProgressLogs(prev => [...prev, update.message]);
-    setProgress(prev => ({
-        current: update.current ?? prev.current,
-        total: update.total ?? prev.total,
-    }));
-  };
+    if(update.trace) {
+      setCurrentTrace(update.trace);
+    }
+  }, []);
 
-  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null }) => {
+  const handleResultComplete = useCallback((result: AuditResult) => {
+    setAuditResults(prevResults => [...prevResults, result]);
+  }, []);
+
+  const handleAllComplete = useCallback(() => {
+    setAuditStatus(AuditStatus.REPORT_READY);
+  }, []);
+
+  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => {
     setAuditStatus(AuditStatus.AUDITING);
     setAuditConfig(data.config);
     setN8nNodeData(data.n8nData);
+    setAuditResults([]);
     setErrorMessage('');
     setImprovementData(null);
-    setProgress({ current: 0, total: data.config.testCaseCount });
-    setProgressLogs([]);
+    setCurrentTrace(null);
 
     try {
-      await runFullAudit(data.config, handleProgressUpdate, (results) => {
-        setAuditResults(results);
-        setOriginalAuditResults(results);
-        setAuditStatus(AuditStatus.REPORT_READY);
-      }, language);
+      await runFullAudit(
+        data.config,
+        handleProgressUpdate,
+        handleResultComplete,
+        handleAllComplete,
+        language
+      );
     } catch (error) {
       console.error("Audit failed:", error);
       const message = error instanceof Error ? error.message : 'An unknown error occurred.';
       const fullMessage = `${t('errorTitle')}: ${message}`;
       setErrorMessage(fullMessage);
-      setProgressLogs(prev => [...prev, `[ERROR] ${message}`]);
       setAuditStatus(AuditStatus.ERROR);
     }
-  }, [language, t]);
+  }, [language, t, handleProgressUpdate, handleResultComplete, handleAllComplete]);
 
-  const handleStartImprovement = useCallback(async () => {
-    if (!auditConfig || !originalAuditResults.length || auditStatus === AuditStatus.IMPROVING) return;
-    
-    setAuditStatus(AuditStatus.IMPROVING);
-    setErrorMessage('');
-    setProgress({ current: 0, total: originalAuditResults.length });
-    setProgressLogs([]);
-
-    try {
-      await runImprovementCycle(auditConfig, originalAuditResults, handleProgressUpdate, (data) => {
-        setImprovementData(data);
-        setAuditResults(data.newResults); // Update results to show the new ones
-        setAuditStatus(AuditStatus.IMPROVEMENT_REPORT_READY);
-      }, language);
-    } catch (error) {
-       console.error("Improvement cycle failed:", error);
-      const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-      const fullMessage = `${t('errorTitle')}: ${message}`;
-      setErrorMessage(fullMessage);
-      setProgressLogs(prev => [...prev, `[ERROR] ${message}`]);
-      setAuditStatus(AuditStatus.ERROR);
-    }
-  }, [auditConfig, originalAuditResults, language, t, auditStatus]);
-
-  useEffect(() => {
-    if (auditStatus === AuditStatus.REPORT_READY) {
-      const timer = setTimeout(() => {
-        handleStartImprovement();
-      }, 5000); // 5-second delay to allow user to see the report first
-
-      return () => clearTimeout(timer);
-    }
-  }, [auditStatus, handleStartImprovement]);
   
   const handleReset = () => {
     setAuditStatus(AuditStatus.CONFIG);
     setAuditConfig(null);
     setAuditResults([]);
-    setOriginalAuditResults([]);
     setImprovementData(null);
     setN8nNodeData(null);
     setProgressMessage('');
-    setProgressLogs([]);
-    setProgress({ current: 0, total: 0 });
+    setCurrentTrace(null);
     setErrorMessage('');
   };
 
   const renderContent = () => {
     switch (auditStatus) {
       case AuditStatus.AUDITING:
-        return <AuditProgress message={progressMessage} title={t('auditInProgress')} progress={progress} logs={progressLogs} />;
-      case AuditStatus.IMPROVING:
-        return <AuditProgress message={progressMessage} title={t('improvementInProgress')} progress={progress} logs={progressLogs} />;
+        if (!auditConfig) return null;
+        if (auditConfig.auditType === 'visual' && n8nNodeData) {
+            return <ExecutionCanvas
+                key={currentTrace?.id || 'initial'}
+                n8nWorkflow={n8nNodeData}
+                currentTrace={currentTrace}
+                message={progressMessage}
+                totalCases={auditConfig.testCaseCount}
+                completedCases={auditResults.length}
+                onReset={handleReset}
+            />;
+        }
+        // For 'real' audit type or if n8nNodeData is somehow missing for visual
+        return <AuditProgress 
+            message={progressMessage}
+            totalCases={auditConfig.testCaseCount}
+            completedCases={auditResults.length}
+            onCancel={handleReset}
+        />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
         return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
-        if (!improvementData || !originalAuditResults.length || !auditConfig) {
+        if (!improvementData || !auditResults.length || !auditConfig) {
             return (
-              <div className="text-center">
+              <Card className="text-center">
                 <p className="text-red-500 text-lg mb-4">{t('errorTitle')}</p>
                 <button onClick={handleReset} className="px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors">{t('errorAction')}</button>
-              </div>
+              </Card>
             );
         }
         return <ImprovementReport 
-                  originalResults={originalAuditResults} 
+                  originalResults={auditResults} 
                   improvementData={improvementData} 
                   onReset={handleReset} 
                   originalWorkflow={auditConfig.workflow}
-                  n8nData={n8nNodeData}
+                  n8nData={n8nNodeData?.nodes || null}
                />;
       case AuditStatus.ERROR:
          return (
-          <div className="text-center">
+          <Card className="text-center">
             <p className="text-red-500 text-lg mb-4">{errorMessage}</p>
             <button
               onClick={handleReset}
@@ -138,13 +126,21 @@ const App: React.FC = () => {
             >
               {t('errorAction')}
             </button>
-          </div>
+          </Card>
         );
       case AuditStatus.CONFIG:
       default:
         return <AgentConfig onStartAudit={handleStartAudit} />;
     }
   };
+  
+  if (auditStatus === AuditStatus.AUDITING) {
+      return (
+        <div className="w-screen h-screen bg-gray-100 dark:bg-gray-900 overflow-hidden">
+            {renderContent()}
+        </div>
+      )
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">

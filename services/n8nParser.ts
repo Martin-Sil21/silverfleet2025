@@ -1,4 +1,4 @@
-import type { ParsedN8nNode } from '../types';
+import type { ParsedN8nNode, N8nConnection, ParsedN8nWorkflow } from '../types';
 
 interface N8nNode {
   parameters: Record<string, any>;
@@ -6,16 +6,12 @@ interface N8nNode {
   type: string;
   id: string; // n8n node ID
   credentials?: any;
+  position: [number, number];
 }
 
-interface N8nConnection {
-    sourceNodeId: string;
-    targetNodeId: string;
-}
-
-interface N8nWorkflow {
+interface N8nRawWorkflow {
   nodes: N8nNode[];
-  connections: N8nConnection[];
+  connections: Record<string, any>;
 }
 
 const getSystemPromptFromNode = (parameters: Record<string, any>): string | undefined => {
@@ -54,50 +50,6 @@ const getSystemPromptFromNode = (parameters: Record<string, any>): string | unde
     return undefined;
 }
 
-const topologicalSort = (nodes: ParsedN8nNode[], connections: N8nConnection[]): ParsedN8nNode[] => {
-    const sorted: ParsedN8nNode[] = [];
-    const inDegree: { [key: string]: number } = {};
-    const adjList: { [key: string]: string[] } = {};
-    const nodeMap: { [key: string]: ParsedN8nNode } = {};
-
-    nodes.forEach(node => {
-        inDegree[node.id] = 0;
-        adjList[node.id] = [];
-        nodeMap[node.id] = node;
-    });
-
-    connections.forEach(conn => {
-        if (adjList[conn.sourceNodeId] !== undefined && adjList[conn.targetNodeId] !== undefined) {
-            adjList[conn.sourceNodeId].push(conn.targetNodeId);
-            inDegree[conn.targetNodeId]++;
-        }
-    });
-
-    const queue = nodes.filter(node => inDegree[node.id] === 0);
-
-    while (queue.length > 0) {
-        const uNode = queue.shift()!;
-        sorted.push(uNode);
-
-        if (adjList[uNode.id]) {
-            for (const v of adjList[uNode.id]) {
-                inDegree[v]--;
-                if (inDegree[v] === 0) {
-                    const vNode = nodeMap[v];
-                    if (vNode) queue.push(vNode);
-                }
-            }
-        }
-    }
-    
-    if (sorted.length !== nodes.length) {
-        console.warn("Cycle detected in graph or disconnected components; returning original node order.");
-        return nodes; 
-    }
-
-    return sorted;
-};
-
 const transformConnections = (n8nConnections: Record<string, any>, nodes: N8nNode[]): N8nConnection[] => {
     const connections: N8nConnection[] = [];
     const idToNodeMap = new Map<string, N8nNode>(nodes.map(n => [n.id, n]));
@@ -109,18 +61,22 @@ const transformConnections = (n8nConnections: Record<string, any>, nodes: N8nNod
         if (!sourceNode) continue;
 
         const outputs = n8nConnections[sourceId];
-        for (const outputType in outputs) {
-            if (!Object.prototype.hasOwnProperty.call(outputs, outputType)) continue;
+        for (const sourceHandle in outputs) {
+            if (!Object.prototype.hasOwnProperty.call(outputs, sourceHandle)) continue;
             
-            const targetGroups = outputs[outputType];
+            const targetGroups = outputs[sourceHandle];
             if (Array.isArray(targetGroups)) {
                 for (const group of targetGroups) {
-                     if(group.id) { // This is the new format
-                        const targetNode = idToNodeMap.get(group.id);
-                        if (targetNode) {
-                            connections.push({ sourceNodeId: sourceNode.id, targetNodeId: targetNode.id });
-                        }
-                    }
+                     if(Array.isArray(group)) {
+                         for (const target of group) {
+                            if(target.id) {
+                                const targetNode = idToNodeMap.get(target.id);
+                                if (targetNode) {
+                                    connections.push({ sourceNodeId: sourceNode.id, targetNodeId: targetNode.id, sourceHandle });
+                                }
+                            }
+                         }
+                     }
                 }
             }
         }
@@ -128,16 +84,28 @@ const transformConnections = (n8nConnections: Record<string, any>, nodes: N8nNod
     return connections;
 };
 
-export const parseN8nWorkflow = (jsonContent: string): ParsedN8nNode[] => {
+export const parseN8nWorkflow = (jsonContent: string): ParsedN8nWorkflow => {
   try {
-    const workflow: N8nWorkflow = JSON.parse(jsonContent);
+    const workflow: N8nRawWorkflow = JSON.parse(jsonContent);
 
     if (!workflow || !Array.isArray(workflow.nodes) || !workflow.connections) {
       throw new Error("Invalid n8n workflow structure. 'nodes' or 'connections' not found.");
     }
 
+    const detectedEndpoints: string[] = [];
+    workflow.nodes.forEach(node => {
+        if (node.type === 'n8n-nodes-base.httpRequest') {
+            const url = node.parameters?.url;
+            if (typeof url === 'string' && url.trim().startsWith('http') && !url.includes('{{')) {
+                detectedEndpoints.push(url.trim());
+            }
+        }
+    });
+
     const allNodes: ParsedN8nNode[] = workflow.nodes.map((node) => {
       const systemPrompt = getSystemPromptFromNode(node.parameters);
+      const position = { x: node.position?.[0] || 0, y: node.position?.[1] || 0 };
+      
       if (systemPrompt) {
         return {
           id: node.id,
@@ -145,6 +113,8 @@ export const parseN8nWorkflow = (jsonContent: string): ParsedN8nNode[] => {
           type: node.type,
           nodeType: 'agent',
           systemPrompt,
+          parameters: node.parameters,
+          position,
         };
       }
       return {
@@ -152,6 +122,8 @@ export const parseN8nWorkflow = (jsonContent: string): ParsedN8nNode[] => {
         name: node.name || `Unnamed Tool Node`,
         type: node.type,
         nodeType: 'tool',
+        parameters: node.parameters,
+        position,
       };
     });
       
@@ -159,14 +131,9 @@ export const parseN8nWorkflow = (jsonContent: string): ParsedN8nNode[] => {
         throw new Error("No nodes were found in the workflow.");
     }
     
-    if (allNodes.length === 1) {
-        return allNodes;
-    }
+    const connections = transformConnections(workflow.connections, workflow.nodes);
     
-    const connections = transformConnections(workflow.connections as any, workflow.nodes);
-    
-    const sortedNodes = topologicalSort(allNodes, connections);
-    return sortedNodes;
+    return { nodes: allNodes, connections, detectedEndpoints: [...new Set(detectedEndpoints)] };
 
   } catch (error) {
     if (error instanceof SyntaxError) {

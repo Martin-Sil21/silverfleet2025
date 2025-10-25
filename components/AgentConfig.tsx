@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import type { AuditConfig, ParsedN8nNode, WorkflowNode } from '../types';
+import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';
 import Card from './Card';
 import { parseN8nWorkflow } from '../services/n8nParser';
@@ -7,12 +7,15 @@ import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
 import { useTranslation } from '../hooks/useTranslation';
 import { XCircleIcon } from './icons/XCircleIcon';
+import { CheckCircleIcon } from './icons/CheckCircleIcon';
 import { SparklesIcon } from './icons/SparklesIcon';
-import { suggestAuditCriteria } from '../services/geminiService';
+import { suggestAuditCriteria, generateSamplePayload } from '../services/geminiService';
 import Loader from './Loader';
+import { EyeIcon } from './icons/EyeIcon';
+import { BoltIcon } from './icons/BoltIcon';
 
 interface AgentConfigProps {
-  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nNode[] | null, n8nJson?: any }) => void;
+  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => void;
 }
 
 const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
@@ -23,25 +26,45 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     t('defaultCriteria2'),
     t('defaultCriteria3'),
     t('defaultCriteria4'),
+    t('defaultCriteria5'),
   ], [t]);
 
-  const [workflow, setWorkflow] = useState<WorkflowNode[]>([{
-    type: 'agent',
-    id: `default-${Date.now()}`,
-    name: 'Agent 1',
-    systemPrompt: 'You are a helpful and friendly assistant.'
-  }]);
+  const [workflow, setWorkflow] = useState<WorkflowNode[]>([]);
+  const [connections, setConnections] = useState<N8nConnection[]>([]);
   const [criteria, setCriteria] = useState<string[]>(DEFAULT_CRITERIA);
   const [newCriterion, setNewCriterion] = useState('');
   const [testCaseCount, setTestCaseCount] = useState(5);
-  const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nNode[] | null>(null);
-  const [originalN8nJson, setOriginalN8nJson] = useState<any>(null); // JSON original completo
+  const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nWorkflow | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isSuggestingCriteria, setIsSuggestingCriteria] = useState(false);
   
-  // n8n Real Execution Config
-  const [useRealExecution, setUseRealExecution] = useState(false);
-  const [n8nWebhookUrl, setN8nWebhookUrl] = useState('');
+  const [endpointUrl, setEndpointUrl] = useState('');
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [testMessage, setTestMessage] = useState('');
+
+  const [samplePayload, setSamplePayload] = useState<Record<string, any> | null>(null);
+  const [rawPayloadText, setRawPayloadText] = useState('');
+  const [payloadError, setPayloadError] = useState<string | null>(null);
+  const [isGeneratingPayload, setIsGeneratingPayload] = useState(false);
+  
+  const [auditType, setAuditType] = useState<'visual' | 'real'>('visual');
+
+
+  const fetchAndSetCriteria = async (workflowForSuggestion: WorkflowNode[], connectionsForSuggestion: N8nConnection[]) => {
+    setIsSuggestingCriteria(true);
+    try {
+      const suggested = await suggestAuditCriteria(workflowForSuggestion, connectionsForSuggestion, language);
+      const combined = [...DEFAULT_CRITERIA, ...suggested];
+      const uniqueCriteria = [...new Set(combined)];
+      setCriteria(uniqueCriteria);
+    } catch(error) {
+      const message = error instanceof Error ? error.message : "Could not suggest criteria.";
+      setFileError(message);
+      setCriteria(DEFAULT_CRITERIA); // Fallback to default
+    } finally {
+      setIsSuggestingCriteria(false);
+    }
+  };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -49,6 +72,12 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
 
     setFileError(null);
     setParsedN8nData(null);
+    setEndpointUrl('');
+    setTestStatus('idle');
+    setSamplePayload(null);
+    setRawPayloadText('');
+    setPayloadError(null);
+
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -56,18 +85,19 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         const text = e.target?.result as string;
         if (!text) throw new Error("File is empty.");
         
-        // Guardar el JSON original completo
-        const jsonData = JSON.parse(text);
-        setOriginalN8nJson(jsonData);
+        const parsedWorkflow = parseN8nWorkflow(text);
+        if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
+            setEndpointUrl(parsedWorkflow.detectedEndpoints[0]);
+        }
         
-        const parsedNodes = parseN8nWorkflow(text);
-        const newWorkflow: WorkflowNode[] = parsedNodes.map(node => {
+        const newWorkflow: WorkflowNode[] = parsedWorkflow.nodes.map(node => {
           if (node.nodeType === 'agent' && node.systemPrompt) {
             return {
               type: 'agent',
               id: node.id,
               name: node.name,
               systemPrompt: node.systemPrompt,
+              parameters: node.parameters,
             };
           }
           return {
@@ -75,18 +105,79 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
             id: node.id,
             name: node.name,
             nodeType: node.type,
+            parameters: node.parameters,
           };
         });
         setWorkflow(newWorkflow);
-        setParsedN8nData(parsedNodes);
+        setConnections(parsedWorkflow.connections);
+        setParsedN8nData(parsedWorkflow);
+        fetchAndSetCriteria(newWorkflow, parsedWorkflow.connections);
       } catch (error) {
         const message = error instanceof Error ? error.message : "An unknown error occurred during parsing.";
         setFileError(message);
+        setCriteria(DEFAULT_CRITERIA);
       }
     };
     reader.onerror = () => setFileError("Failed to read the file.");
     reader.readAsText(file);
     event.target.value = '';
+  };
+
+  const handlePayloadFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setPayloadError(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result as string;
+        if (!text) throw new Error("File is empty.");
+        setRawPayloadText(text);
+        const parsedPayload = JSON.parse(text);
+        setSamplePayload(parsedPayload);
+      } catch (error) {
+        setPayloadError(t('payloadError'));
+        setSamplePayload(null);
+      }
+    };
+    reader.onerror = () => setPayloadError("Failed to read the payload file.");
+    reader.readAsText(file);
+    event.target.value = '';
+  };
+  
+  const handleGeneratePayload = async () => {
+      if(!workflow || !connections) return;
+      setIsGeneratingPayload(true);
+      setPayloadError(null);
+      try {
+          const payload = await generateSamplePayload(workflow, connections, language);
+          setSamplePayload(payload);
+          setRawPayloadText(JSON.stringify(payload, null, 2));
+      } catch (error) {
+          const message = error instanceof Error ? error.message : "Could not generate payload.";
+          setPayloadError(message);
+      } finally {
+          setIsGeneratingPayload(false);
+      }
+  };
+
+  const handlePayloadTextChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newText = event.target.value;
+    setRawPayloadText(newText);
+    if (newText.trim() === '') {
+      setSamplePayload(null);
+      setPayloadError(null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(newText);
+      setSamplePayload(parsed);
+      setPayloadError(null);
+    } catch (e) {
+      setSamplePayload(null);
+      setPayloadError(t('payloadError'));
+    }
   };
 
   const handleAddCriterion = () => {
@@ -97,99 +188,92 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
   };
 
   const handleRemoveCriterion = (criterionToRemove: string) => {
+    if(DEFAULT_CRITERIA.includes(criterionToRemove)) return;
     setCriteria(criteria.filter(c => c !== criterionToRemove));
-  };
-  
-  const handleAddAgent = () => {
-    const newAgent: WorkflowNode = {
-      type: 'agent',
-      id: `manual-${Date.now()}`,
-      name: `Agent ${workflow.filter(n => n.type === 'agent').length + 1}`,
-      systemPrompt: 'New agent prompt...'
-    };
-    setWorkflow([...workflow, newAgent]);
-    setParsedN8nData(null);
-  };
-
-  const handleRemoveNode = (index: number) => {
-    if (workflow.length > 1) {
-      setWorkflow(workflow.filter((_, i) => i !== index));
-      setParsedN8nData(null);
-    }
-  };
-
-  const handleNodeChange = (index: number, value: string) => {
-    const newWorkflow = [...workflow];
-    const node = newWorkflow[index];
-    if (node.type === 'agent') {
-      node.systemPrompt = value;
-    }
-    setWorkflow(newWorkflow);
-    setParsedN8nData(null);
   };
 
   const handleSuggestCriteria = async () => {
-    setIsSuggestingCriteria(true);
+    await fetchAndSetCriteria(workflow, connections);
+  };
+  
+  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setEndpointUrl(e.target.value);
+    setTestStatus('idle');
+    setTestMessage('');
+  };
+
+  const handleTestEndpoint = async () => {
+    if (!endpointUrl.trim() || !endpointUrl.startsWith('http')) {
+        setTestStatus('error');
+        setTestMessage(t('testError', { error: 'Please enter a valid URL.' }));
+        return;
+    }
+    setTestStatus('testing');
+    setTestMessage('');
     try {
-      const suggested = await suggestAuditCriteria(workflow, language);
-      setCriteria(suggested);
-    } catch(error) {
-      // Basic error handling for the user
-      const message = error instanceof Error ? error.message : "Could not suggest criteria.";
-      alert(message);
-    } finally {
-      setIsSuggestingCriteria(false);
+        const response = await fetch(endpointUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(samplePayload || { message: "Silver Fleet audit connectivity test" })
+        });
+        if (!response.ok) {
+            throw new Error(`Endpoint returned status ${response.status}: ${response.statusText}`);
+        }
+        setTestStatus('success');
+        setTestMessage(t('testSuccess'));
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "An unknown network error occurred.";
+        setTestStatus('error');
+        setTestMessage(t('testError', { error: message }));
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!parsedN8nData) {
+        setFileError("Please upload an n8n workflow to run the visual audit.");
+        return;
+    }
+    if (!samplePayload) {
+        setPayloadError("A sample payload is required to generate test cases.");
+        return;
+    }
+    if (auditType === 'real' && testStatus !== 'success') {
+        setTestMessage(t('testEndpointFirstError'));
+        setTestStatus('error');
+        return;
+    }
     const isWorkflowValid = workflow.every(node => 
       node.type === 'tool' || (node.type === 'agent' && node.systemPrompt.trim())
     );
-    
-    if (!isWorkflowValid || criteria.length === 0) {
-      alert('Por favor completa el workflow y los criterios de auditoría.');
-      return;
+    if (isWorkflowValid && criteria.length > 0) {
+      const config: AuditConfig = { 
+          workflow, 
+          connections, 
+          criteria, 
+          testCaseCount, 
+          samplePayload, 
+          auditType,
+          endpointUrl: auditType === 'real' ? endpointUrl : undefined
+      };
+      onStartAudit({ config, n8nData: parsedN8nData });
     }
-
-    // ⚠️ WEBHOOK OBLIGATORIO para auditoría real
-    if (useRealExecution && !n8nWebhookUrl) {
-      alert(
-        '❌ WEBHOOK REQUERIDO\n\n' +
-        'Para realizar una auditoría REAL, necesitás proporcionar el webhook de n8n.\n\n' +
-        'Sin el webhook, los resultados serían INVENTADOS por IA y la auditoría sería INÚTIL.\n\n' +
-        '💡 Tip: Obtené el webhook desde tu workflow de n8n (nodo Webhook).'
-      );
-      return;
-    }
-
-    // ⚠️ Advertencia para modo DEMO (sin webhook)
-    if (!useRealExecution) {
-      const proceed = confirm(
-        '⚠️ ADVERTENCIA: Modo DEMO\n\n' +
-        'Sin usar el webhook de n8n real, la auditoría usará datos SIMULADOS/INVENTADOS por IA.\n\n' +
-        '❌ Los resultados NO reflejarán el comportamiento real de tu workflow.\n' +
-        '❌ La auditoría será POCO CONFIABLE.\n' +
-        '✅ Para auditoría REAL: Activa "Usar ejecución real en n8n" y proporciona el webhook.\n\n' +
-        '¿Continuar con modo DEMO de todos modos?'
-      );
-      if (!proceed) return;
-    }
-
-    const config: AuditConfig = {
-      workflow,
-      criteria,
-      testCaseCount,
-      useRealExecution,
-      ...(useRealExecution && n8nWebhookUrl && {
-        n8nConfig: {
-          webhookUrl: n8nWebhookUrl,
-        }
-      })
-    };
-    onStartAudit({ config, n8nData: parsedN8nData, n8nJson: originalN8nJson });
   };
+  
+  const renderTestStatus = () => {
+    switch (testStatus) {
+      case 'testing':
+        return <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400"><Loader /> {t('testingEndpoint')}</div>;
+      case 'success':
+        return <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400"><CheckCircleIcon className="w-5 h-5" /> {testMessage}</div>;
+      case 'error':
+        return <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400"><XCircleIcon className="w-5 h-5" /> {testMessage}</div>;
+      default:
+        return null;
+    }
+  };
+
+  const isPayloadInvalid = payloadError && rawPayloadText.trim() !== '';
 
   return (
     <>
@@ -201,7 +285,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         <div className="relative border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center hover:border-primary-500 dark:hover:border-primary-400 transition-colors">
           <UploadIcon className="mx-auto h-12 w-12 text-gray-400" />
           <label htmlFor="file-upload" className="mt-2 block text-sm font-semibold text-primary-600 hover:text-primary-500 cursor-pointer">
-            <span>{t('uploadFile')}</span>
+            <span>{parsedN8nData ? t('uploadSuccess') : t('uploadFile')}</span>
             <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".json" onChange={handleFileChange} />
           </label>
           <p className="text-xs text-gray-500 dark:text-gray-400">{t('uploadHint')}</p>
@@ -213,141 +297,80 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         )}
       </Card>
 
-      <Card className="mb-8">
-        <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('n8nExecutionTitle')}</h2>
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          {t('n8nExecutionDescription')}
-        </p>
-        
-        <div className="space-y-4">
-          <div className="flex items-center">
-            <input
-              id="use-real-execution"
-              type="checkbox"
-              checked={useRealExecution}
-              onChange={(e) => setUseRealExecution(e.target.checked)}
-              className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
-            />
-            <label htmlFor="use-real-execution" className="ml-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
-              {t('useRealExecution')}
-            </label>
-          </div>
-
-          {useRealExecution && (
-            <div className="pl-6 border-l-2 border-primary-500 space-y-4 animate-fadeIn">
-              <div className="bg-green-50 dark:bg-green-900/20 border border-green-500 rounded-lg p-4 mb-4">
-                <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">
-                  ✅ Modo Auditoría REAL activado
-                </h4>
-                <p className="text-sm text-green-700 dark:text-green-400">
-                  El sistema ejecutará los test cases en tu n8n real y auditará los resultados verdaderos.
-                </p>
+      {parsedN8nData && (
+        <Card className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('samplePayloadTitle')}</h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('samplePayloadDescription')}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-4">
+                    <label htmlFor="payload-upload" className="w-full text-center cursor-pointer bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 font-bold py-3 px-4 rounded-lg transition">
+                        <span>{samplePayload ? t('uploadPayloadSuccess') : t('uploadPayload')}</span>
+                        <input id="payload-upload" type="file" className="sr-only" accept=".json" onChange={handlePayloadFileChange} />
+                    </label>
+                    <button type="button" onClick={handleGeneratePayload} disabled={isGeneratingPayload} className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-not-allowed">
+                        {isGeneratingPayload ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
+                        {isGeneratingPayload ? t('suggestingPayload') : t('suggestPayload')}
+                    </button>
+                </div>
+                <div>
+                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('payloadPreviewTitle')}</label>
+                     <textarea
+                        value={rawPayloadText}
+                        onChange={handlePayloadTextChange}
+                        placeholder={t('payloadPreviewPlaceholder')}
+                        className={`w-full h-40 p-2 font-mono text-xs bg-gray-50 dark:bg-gray-700 border rounded-md resize-none transition-colors focus:outline-none focus:ring-2 ${
+                            isPayloadInvalid
+                            ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
+                            : 'border-gray-300 dark:border-gray-600 focus:border-primary-500 focus:ring-primary-500'
+                        }`}
+                    />
+                </div>
+            </div>
+             {payloadError && (
+              <div className="mt-4 text-center p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg">
+                <p>{payloadError}</p>
               </div>
-              
-              <div>
-                <label htmlFor="n8n-webhook-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  {t('n8nWebhookUrl')} <span className="text-red-500">* OBLIGATORIO</span>
-                </label>
+            )}
+        </Card>
+      )}
+      
+      {parsedN8nData && (
+        <Card className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('endpointTestTitle')}</h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('endpointTestDescription')}</p>
+            <div className="flex flex-col sm:flex-row gap-2">
                 <input
-                  id="n8n-webhook-url"
-                  type="url"
-                  value={n8nWebhookUrl}
-                  onChange={(e) => setN8nWebhookUrl(e.target.value)}
-                  placeholder="https://silverfleet.online/webhook/590785a9-e814-4a42-959a-7e8e4ff5ab9e"
-                  className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition font-mono text-sm"
-                  required={useRealExecution}
+                    type="url"
+                    className="flex-grow p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
+                    value={endpointUrl}
+                    onChange={handleUrlChange}
+                    placeholder={t('endpointUrlPlaceholder')}
                 />
-                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  💡 {t('n8nWebhookHint')}
-                </p>
-              </div>
+                <button 
+                    type="button" 
+                    onClick={handleTestEndpoint} 
+                    disabled={testStatus === 'testing' || !endpointUrl || !samplePayload}
+                    className="px-4 py-2 bg-primary-600 text-white font-semibold rounded-lg shadow-sm hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                    {testStatus === 'testing' ? t('testingEndpoint') : t('testEndpointButton')}
+                </button>
             </div>
-          )}
-          
-          {!useRealExecution && (
-            <div className="mt-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-500 rounded-lg p-4">
-              <h4 className="font-semibold text-yellow-800 dark:text-yellow-300 mb-2 flex items-center gap-2">
-                ⚠️ Advertencia: Modo DEMO/Simulación
-              </h4>
-              <p className="text-sm text-yellow-700 dark:text-yellow-400 mb-2">
-                Sin el webhook de n8n, el sistema usará <strong>datos INVENTADOS por IA</strong> para simular la ejecución.
-              </p>
-              <ul className="text-sm text-yellow-700 dark:text-yellow-400 space-y-1 list-disc list-inside">
-                <li>Los resultados <strong>NO</strong> reflejarán el comportamiento real</li>
-                <li>La auditoría será <strong>POCO CONFIABLE</strong></li>
-                <li>Solo sirve para <strong>demostración</strong> de la interfaz</li>
-              </ul>
-              <p className="text-sm text-yellow-800 dark:text-yellow-300 mt-3 font-semibold">
-                ✅ Para una auditoría real: Activa "Usar ejecución real en n8n" y proporciona el webhook.
-              </p>
+             <div className="mt-3 min-h-[24px]">
+                {renderTestStatus()}
             </div>
-          )}
-        </div>
-      </Card>
+        </Card>
+      )}
     
       <Card>
         <form onSubmit={handleSubmit} className="space-y-8">
           <h2 className="text-2xl font-semibold text-gray-800 dark:text-white text-center">{t('configTitle')}</h2>
           
           <div>
-            <label className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-4">
-              {t('workflowConfigLabel')}
-            </label>
-            <div className="space-y-6 border-l-2 border-gray-200 dark:border-gray-700 pl-6">
-              {workflow.map((node, index) => (
-                <div key={node.id} className="relative">
-                   <div className="absolute -left-[33px] top-1 h-4 w-4 rounded-full bg-primary-500 ring-4 ring-white dark:ring-gray-800"></div>
-                  {node.type === 'agent' ? (
-                     <div className="flex items-start gap-4">
-                        <div className="flex-grow">
-                           <h3 className="font-semibold text-gray-800 dark:text-white">{t('agentNodeTitle', { name: node.name })}</h3>
-                           <textarea
-                              rows={3}
-                              className="w-full mt-2 p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                              value={node.systemPrompt}
-                              onChange={(e) => handleNodeChange(index, e.target.value)}
-                              placeholder={t('promptPlaceholder', { index: index + 1 })}
-                           />
-                        </div>
-                         <button type="button" onClick={() => handleRemoveNode(index)} 
-                           className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
-                           disabled={workflow.length <= 1}
-                         >
-                           <TrashIcon className="w-6 h-6" />
-                         </button>
-                     </div>
-                  ) : (
-                      <div className="flex items-start gap-4">
-                        <div className="flex-grow">
-                            <h3 className="font-semibold text-gray-800 dark:text-white">{t('toolNodeTitle', { name: node.name })}</h3>
-                             <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t('toolNodeType', { type: node.nodeType })}</p>
-                             <p className="text-sm font-medium text-blue-600 dark:text-blue-300 p-3 bg-blue-50 dark:bg-blue-900/50 border-l-4 border-blue-500 rounded-r-lg">
-                                {t('toolSimulationAuto')}
-                             </p>
-                        </div>
-                        <button type="button" onClick={() => handleRemoveNode(index)} 
-                          className="p-3 text-gray-400 hover:text-red-500 disabled:text-gray-600 disabled:cursor-not-allowed"
-                          disabled={workflow.length <= 1}
-                        >
-                           <TrashIcon className="w-6 h-6" />
-                        </button>
-                      </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <button type="button" onClick={handleAddAgent} className="mt-4 text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200 flex items-center gap-1">
-                <PlusCircleIcon className="w-5 h-5"/>
-                {t('addAgent')}
-            </button>
-          </div>
-
-          <div>
             <div className="flex items-center justify-between mb-2">
                 <label className="block text-lg font-medium text-gray-700 dark:text-gray-300">
                   {t('criteriaLabel')}
                 </label>
-                <button type="button" onClick={handleSuggestCriteria} disabled={isSuggestingCriteria} className="flex items-center gap-2 text-sm font-semibold py-2 px-3 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-wait">
+                <button type="button" onClick={handleSuggestCriteria} disabled={isSuggestingCriteria || !parsedN8nData} className="flex items-center gap-2 text-sm font-semibold py-2 px-3 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-not-allowed">
                     {isSuggestingCriteria ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
                     {isSuggestingCriteria ? t('suggestingCriteria') : t('suggestCriteria')}
                 </button>
@@ -355,11 +378,13 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('criteriaDescription')}</p>
             <div className="flex flex-wrap gap-2 mb-3">
               {criteria.map((c) => (
-                <span key={c} className="flex items-center bg-primary-100 dark:bg-primary-900 text-primary-800 dark:text-primary-200 text-sm font-medium px-3 py-1 rounded-full">
+                <span key={c} className={`flex items-center text-sm font-medium px-3 py-1 rounded-full ${DEFAULT_CRITERIA.includes(c) ? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200' : 'bg-primary-100 dark:bg-primary-900 text-primary-800 dark:text-primary-200'}`}>
                   {c}
-                  <button type="button" onClick={() => handleRemoveCriterion(c)} className="ml-2 text-primary-600 dark:text-primary-400 hover:text-primary-800 dark:hover:text-primary-200">
-                    <XCircleIcon className="w-4 h-4" />
-                  </button>
+                  {!DEFAULT_CRITERIA.includes(c) && (
+                    <button type="button" onClick={() => handleRemoveCriterion(c)} className="ml-2 text-primary-600 dark:text-primary-400 hover:text-primary-800 dark:hover:text-primary-200">
+                        <XCircleIcon className="w-4 h-4" />
+                    </button>
+                  )}
                 </span>
               ))}
             </div>
@@ -393,10 +418,34 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
               className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer"
             />
           </div>
+
+          <div>
+             <label className="block text-lg font-medium text-gray-700 dark:text-gray-300 mb-3">{t('auditModeTitle')}</label>
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div onClick={() => setAuditType('visual')} className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${auditType === 'visual' ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/40' : 'border-gray-300 dark:border-gray-600 hover:border-primary-400'}`}>
+                    <div className="flex items-center gap-3">
+                        <EyeIcon className="w-6 h-6 text-primary-600 dark:text-primary-400"/>
+                        <div>
+                            <h4 className="font-semibold text-gray-800 dark:text-white">{t('visualAuditMode')}</h4>
+                            <p className="text-sm text-gray-600 dark:text-gray-300">{t('visualAuditModeDesc')}</p>
+                        </div>
+                    </div>
+                </div>
+                <div onClick={() => testStatus === 'success' ? setAuditType('real') : null} className={`p-4 border-2 rounded-lg transition-all ${auditType === 'real' ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/40' : 'border-gray-300 dark:border-gray-600'} ${testStatus === 'success' ? 'cursor-pointer hover:border-primary-400' : 'cursor-not-allowed opacity-60'}`}>
+                     <div className="flex items-center gap-3">
+                        <BoltIcon className="w-6 h-6 text-primary-600 dark:text-primary-400"/>
+                        <div>
+                            <h4 className="font-semibold text-gray-800 dark:text-white">{t('liveAuditMode')}</h4>
+                            <p className="text-sm text-gray-600 dark:text-gray-300">{t('liveAuditModeDesc')}</p>
+                        </div>
+                    </div>
+                </div>
+             </div>
+          </div>
           
           <div className="pt-4">
             <button type="submit" className="w-full py-3 px-4 bg-primary-600 text-white font-semibold rounded-lg shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
-              disabled={workflow.some(n => n.type === 'agent' && !n.systemPrompt.trim()) || criteria.length === 0}
+              disabled={!parsedN8nData || !samplePayload || criteria.length === 0}
             >
               {t('startAuditButton')}
             </button>
