@@ -66,6 +66,19 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     }
   };
 
+  const findUrlInObject = (obj: any): string | null => {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (typeof val === 'string' && (val.startsWith('http://') || val.startsWith('https://'))) return val;
+      if (typeof val === 'object') {
+        const nested = findUrlInObject(val);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -86,9 +99,35 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         if (!text) throw new Error("File is empty.");
         
         const parsedWorkflow = parseN8nWorkflow(text);
+
+        // Auto-configure endpoint if detected
         if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
             setEndpointUrl(parsedWorkflow.detectedEndpoints[0]);
+            setTestStatus('idle');
+            setTestMessage('');
+            console.log('✅ Webhook detectado automáticamente:', parsedWorkflow.detectedEndpoints[0]);
         }
+
+    // Auto-configure sample payload if detected
+    if (parsedWorkflow.detectedSamplePayload) {
+      setSamplePayload(parsedWorkflow.detectedSamplePayload);
+      setRawPayloadText(JSON.stringify(parsedWorkflow.detectedSamplePayload, null, 2));
+      setPayloadError(null);
+      console.log('✅ Payload de muestra detectado automáticamente:', parsedWorkflow.detectedSamplePayload);
+      // If endpoint is not set yet, try to populate it from detected endpoints or payload
+      if (!endpointUrl) {
+        if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
+          setEndpointUrl(parsedWorkflow.detectedEndpoints[0]);
+          console.log('✅ Endpoint auto-detectado desde el workflow:', parsedWorkflow.detectedEndpoints[0]);
+        } else {
+          const found = findUrlInObject(parsedWorkflow.detectedSamplePayload);
+          if (found) {
+            setEndpointUrl(found);
+            console.log('✅ Endpoint inferido desde el payload de muestra:', found);
+          }
+        }
+      }
+    }
         
         const newWorkflow: WorkflowNode[] = parsedWorkflow.nodes.map(node => {
           if (node.nodeType === 'agent' && node.systemPrompt) {
@@ -112,6 +151,35 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         setConnections(parsedWorkflow.connections);
         setParsedN8nData(parsedWorkflow);
         fetchAndSetCriteria(newWorkflow, parsedWorkflow.connections);
+    // If endpoint wasn't detected previously, try to extract from the first node parameters (hook may be there)
+    if (!endpointUrl && parsedWorkflow.nodes && parsedWorkflow.nodes.length > 0) {
+      const first = parsedWorkflow.nodes[0];
+      try {
+        // Pattern A: httpHost + path
+        const path = first.parameters?.path;
+        const httpHost = first.parameters?.httpHost;
+        if (httpHost && path) {
+          const built = (httpHost.startsWith('http') ? httpHost : `https://${httpHost}`) + path;
+          setEndpointUrl(built);
+          console.log('✅ Endpoint inferido desde el primer nodo (httpHost+path):', built);
+        } else if (first.parameters?.url) {
+          setEndpointUrl(first.parameters.url);
+          console.log('✅ Endpoint inferido desde el primer nodo (url):', first.parameters.url);
+        } else if (first.parameters?.webhookId) {
+          const built = `https://silverfleet.com.ar/webhook/${first.parameters.webhookId}`;
+          setEndpointUrl(built);
+          console.log('✅ Endpoint inferido desde el primer nodo (webhookId):', built);
+        } else {
+          const found = findUrlInObject(first.parameters);
+          if (found) {
+            setEndpointUrl(found);
+            console.log('✅ Endpoint inferido escaneando parámetros del primer nodo:', found);
+          }
+        }
+      } catch (e) {
+        // ignore extraction errors
+      }
+    }
       } catch (error) {
         const message = error instanceof Error ? error.message : "An unknown error occurred during parsing.";
         setFileError(message);
@@ -136,6 +204,19 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         setRawPayloadText(text);
         const parsedPayload = JSON.parse(text);
         setSamplePayload(parsedPayload);
+        // If endpoint not set yet, try to infer from parsed payload or parsedN8nData
+        if (!endpointUrl) {
+            if (parsedN8nData?.detectedEndpoints && parsedN8nData.detectedEndpoints.length > 0) {
+                setEndpointUrl(parsedN8nData.detectedEndpoints[0]);
+                console.log('✅ Endpoint auto-detectado desde el workflow (al subir payload):', parsedN8nData.detectedEndpoints[0]);
+            } else {
+                const found = findUrlInObject(parsedPayload);
+                if (found) {
+                    setEndpointUrl(found);
+                    console.log('✅ Endpoint inferido desde el payload subido:', found);
+                }
+            }
+        }
       } catch (error) {
         setPayloadError(t('payloadError'));
         setSamplePayload(null);
@@ -154,6 +235,19 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
           const payload = await generateSamplePayload(workflow, connections, language);
           setSamplePayload(payload);
           setRawPayloadText(JSON.stringify(payload, null, 2));
+      // If endpoint not set, try to populate it from parsedN8nData or payload content
+      if (!endpointUrl) {
+        if (parsedN8nData?.detectedEndpoints && parsedN8nData.detectedEndpoints.length > 0) {
+          setEndpointUrl(parsedN8nData.detectedEndpoints[0]);
+          console.log('✅ Endpoint auto-detectado desde el workflow (al generar payload):', parsedN8nData.detectedEndpoints[0]);
+        } else {
+          const found = findUrlInObject(payload);
+          if (found) {
+            setEndpointUrl(found);
+            console.log('✅ Endpoint inferido desde el payload generado:', found);
+          }
+        }
+      }
       } catch (error) {
           const message = error instanceof Error ? error.message : "Could not generate payload.";
           setPayloadError(message);

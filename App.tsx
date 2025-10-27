@@ -8,6 +8,7 @@ import ImprovementReport from './components/ImprovementReport';
 import { useTranslation } from './hooks/useTranslation';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import ExecutionCanvas from './components/ExecutionCanvas';
+import CallCenterConsole from './components/CallCenterConsole';
 import Card from './components/Card';
 import AuditProgress from './components/AuditProgress';
 
@@ -19,13 +20,17 @@ const App: React.FC = () => {
   const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nWorkflow | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
   const [currentTrace, setCurrentTrace] = useState<AuditResult | null>(null);
+  const [agents, setAgents] = useState<any[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const { t, language } = useTranslation();
 
-  const handleProgressUpdate = useCallback((update: { message: string, trace?: AuditResult }) => {
+  const handleProgressUpdate = useCallback((update: { message: string, trace?: AuditResult, agents?: any[] }) => {
     setProgressMessage(update.message);
     if(update.trace) {
       setCurrentTrace(update.trace);
+    }
+    if(update.agents) {
+      setAgents(update.agents);
     }
   }, []);
 
@@ -45,6 +50,7 @@ const App: React.FC = () => {
     setErrorMessage('');
     setImprovementData(null);
     setCurrentTrace(null);
+    setAgents([]);
 
     try {
       await runFullAudit(
@@ -73,6 +79,7 @@ const App: React.FC = () => {
     setProgressMessage('');
     setCurrentTrace(null);
     setErrorMessage('');
+    setAgents([]);
   };
 
   const renderContent = () => {
@@ -90,8 +97,20 @@ const App: React.FC = () => {
                 onReset={handleReset}
             />;
         }
-        // For 'real' audit type or if n8nNodeData is somehow missing for visual
-        return <AuditProgress 
+
+        // For 'real' audit type - use CallCenterConsole if we have agents info
+        if (auditConfig.auditType === 'real' && agents.length > 0) {
+            return <CallCenterConsole
+                agents={agents}
+                message={progressMessage}
+                totalCases={auditConfig.testCaseCount}
+                completedCases={auditResults.length}
+                onReset={handleReset}
+            />;
+        }
+
+        // Fallback for 'real' audit type without agents info yet
+        return <AuditProgress
             message={progressMessage}
             totalCases={auditConfig.testCaseCount}
             completedCases={auditResults.length}
