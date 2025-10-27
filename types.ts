@@ -71,6 +71,7 @@ export interface ExecutionStep {
   output: any;
   log: string;
   durationMs: number;
+  timestamp?: number;
 }
 
 

@@ -103,5 +103,10 @@
   "liveAuditTitle": "Fuente de Auditoría en Vivo",
   "liveAuditDescription": "Monitoreando conversaciones en tiempo real con el agente de IA.",
   "backToConfig": "Volver a Configuración",
-  "corsWarning": "Tu endpoint debe estar configurado para permitir peticiones de origen cruzado (CORS) desde esta aplicación. Si la prueba falla con un error de red, revisa las cabeceras de respuesta de tu webhook de n8n."
+  "corsWarning": "Tu endpoint debe estar configurado para permitir peticiones de origen cruzado (CORS) desde esta aplicación. Si la prueba falla con un error de red, revisa las cabeceras de respuesta de tu webhook de n8n.",
+  "exportCsv": "Exportar a CSV",
+  "conversations": "Conversaciones",
+  "testCaseInfo": "Información del Caso de Prueba",
+  "selectConversation": "Selecciona una conversación para ver sus detalles.",
+  "initialData": "Datos Iniciales"
 }

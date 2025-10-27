@@ -103,5 +103,10 @@
   "liveAuditTitle": "Live Audit Feed",
   "liveAuditDescription": "Monitoring real-time conversations with the AI agent.",
   "backToConfig": "Back to Configuration",
-  "corsWarning": "Your endpoint must be configured to allow cross-origin requests (CORS) from this application. If the test fails with a network error, check your n8n webhook's response headers."
+  "corsWarning": "Your endpoint must be configured to allow cross-origin requests (CORS) from this application. If the test fails with a network error, check your n8n webhook's response headers.",
+  "exportCsv": "Export to CSV",
+  "conversations": "Conversations",
+  "testCaseInfo": "Test Case Info",
+  "selectConversation": "Select a conversation to view its details.",
+  "initialData": "Initial Data"
 }

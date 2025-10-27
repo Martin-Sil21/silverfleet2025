@@ -226,21 +226,39 @@ const executeWorkflowVisually = async (
     return { executionTrace, finalStatus: 'SUCCESS' };
 };
 
+const findUserMessageText = (data: any): string => {
+    if (typeof data !== 'object' || data === null) return String(data);
+    const messageKey = Object.keys(data).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query'));
+    return messageKey && typeof data[messageKey] === 'string' ? data[messageKey] : JSON.stringify(data);
+};
+
+const findAgentMessageText = (data: any): string => {
+    if (!data) return "(No response)";
+    if (typeof data === 'string') return data;
+    if (typeof data.response === 'string') return data.response;
+    if (typeof data.output === 'string') return data.output;
+    if (typeof data.message === 'string') return data.message;
+    
+    // Handle nested, multi-part responses like { "response": { "parte1": "...", "parte2": "..." } }
+    if (typeof data.response === 'object' && data.response !== null) {
+        return Object.values(data.response).filter(v => typeof v === 'string').join(' ');
+    }
+    if (typeof data.output === 'object' && data.output !== null) {
+       return JSON.stringify(data.output); // fallback
+    }
+    
+    return JSON.stringify(data); // final fallback
+}
+
 const generateUserMessageText = async (
     testCase: TestCase,
     conversationHistory: ExecutionStep[],
     language: string
 ): Promise<string> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-    const findMessageText = (data: any): string => {
-        if (typeof data !== 'object' || data === null) return JSON.stringify(data);
-        const messageKey = Object.keys(data).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query'));
-        return messageKey && typeof data[messageKey] === 'string' ? data[messageKey] : JSON.stringify(data);
-    };
     
     const historyString = conversationHistory.map(turn => 
-        `User: ${findMessageText(turn.input)}\nAgent: ${JSON.stringify(turn.output)}`
+        `User: ${findUserMessageText(turn.input)}\nAgent: ${findAgentMessageText(turn.output)}`
     ).join('\n\n');
 
     const prompt = `
@@ -280,7 +298,7 @@ const checkIfGoalIsMet = async (
 
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const historyString = conversationHistory.map(turn =>
-        `User: ${JSON.stringify(turn.input)}\nAgent: ${JSON.stringify(turn.output)}`
+        `User: ${findUserMessageText(turn.input)}\nAgent: ${findAgentMessageText(turn.output)}`
     ).join('\n\n');
 
     const prompt = `
@@ -330,7 +348,7 @@ const analyzeResult = async (
     const { testCase, executionTrace, finalStatus } = result;
 
     const traceSummary = config.auditType === 'real'
-        ? executionTrace.map(turn => `\n${turn.nodeId}:\n  User: ${JSON.stringify(turn.input)}\n  Agent: ${JSON.stringify(turn.output)} ${turn.status === 'ERROR' ? `\n  Error: ${turn.log}` : ''}`).join('')
+        ? executionTrace.map(turn => `\n${turn.nodeId}:\n  User: ${findUserMessageText(turn.input)}\n  Agent: ${findAgentMessageText(turn.output)} ${turn.status === 'ERROR' ? `\n  Error: ${turn.log}` : ''}`).join('')
         : executionTrace.map(step => `Node: ${workflow.find(n => n.id === step.nodeId)?.name || step.nodeId} | Status: ${step.status}`).join('\n');
 
     const prompt = `
@@ -479,6 +497,7 @@ export const runFullAudit = async (
                 const step: ExecutionStep = {
                     nodeId: `Turn ${turnCount}`,
                     ...turnResults[index],
+                    timestamp: Date.now(),
                 };
                 conv.history.push(step);
                 onProgress({ 
