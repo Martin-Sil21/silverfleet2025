@@ -1,42 +1,13 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import type { AuditConfig, TestCase, Analysis, AuditResult, ImprovementData, WorkflowNode, N8nConnection, AgentNode, ToolNode, ExecutionStep } from '../types';
-import fs from 'fs';
-import path from 'path';
 
-type ProgressCallback = (update: { message: string; trace?: AuditResult; agents?: any[] }) => void;
+const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+type ProgressCallback = (update: { message: string; trace?: AuditResult }) => void;
 type ResultCallback = (result: AuditResult) => void;
 type CompletionCallback = () => void;
 
 const MAX_CONVERSATION_TURNS = 6;
-
-interface CallCenterAgent {
-    id: string;
-    testCase: TestCase;
-    history: ExecutionStep[];
-    isActive: boolean;
-    currentTurn: number;
-    status: 'WAITING' | 'THINKING' | 'SENDING' | 'WAITING_RESPONSE' | 'COMPLETED' | 'ERROR';
-    conversationGoal: string;
-    personality: string;
-}
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Generic retry helper with exponential backoff
-const withRetries = async <T>(fn: () => Promise<T>, attempts = 3, baseDelay = 500): Promise<T> => {
-    let lastError: any = null;
-    for (let i = 0; i < attempts; i++) {
-        try {
-            return await fn();
-        } catch (e) {
-            lastError = e;
-            const wait = baseDelay * Math.pow(2, i);
-            console.warn(`Attempt ${i + 1} failed. Retrying in ${wait}ms...`, e instanceof Error ? e.message : e);
-            if (i < attempts - 1) await delay(wait);
-        }
-    }
-    throw lastError;
-};
 
 const getLanguageInstruction = (language: string): string => {
     const langName = language === 'es' ? 'Spanish' : 'English';
@@ -86,13 +57,13 @@ export const generateSamplePayload = async (workflow: WorkflowNode[], connection
     ${getLanguageInstruction(language)}
     `;
     
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-pro',
         contents: prompt,
         config: {
             responseMimeType: "application/json",
         },
-    }), 3, 800);
+    });
 
     try {
         const jsonText = response.text.trim();
@@ -114,112 +85,44 @@ const generateTestCases = async (config: AuditConfig, language: string): Promise
     const { workflow, criteria, testCaseCount, connections, samplePayload } = config;
 
     const prompt = `
-    Act as an expert test data engineer creating diverse and realistic user profiles for testing a conversational AI workflow. Generate ${testCaseCount} unique "bot personas" that feel like completely different real people.
-
-    This is the workflow under test:
+    Act as a senior QA engineer creating data for testing a conversational AI workflow. Your task is to generate ${testCaseCount} unique, realistic user profiles ("bot buyers").
+    
+    This is the workflow you are testing:
     ${formatWorkflowForPrompt(workflow, connections)}
 
-    The expected JSON payload structure is:
+    This is the sample JSON structure the workflow expects for each message:
     ${JSON.stringify(samplePayload, null, 2)}
 
-    For each of the ${testCaseCount} test cases, create:
+    Based on your analysis of the workflow and the sample payload, for each of the ${testCaseCount} test cases, you must:
+    1.  Create a complete JSON payload (\`initialPayload\`) that is **relevant to the workflow's purpose** and follows the sample structure but with **completely new and unique data**. For example, if the workflow is for customer support, create different customer issues.
+    2.  Define a user 'persona' that describes the user's personality and communication style (e.g., "Impatient customer, uses short, direct sentences"). This persona should be consistent with the payload data.
+    3.  Define a clear 'conversationGoal' for the persona that is achievable through the provided workflow (e.g., "Find out why their delivery is late and get a new ETA").
+    4.  Provide a unique 'id' and a concise 'title' for the test case that summarizes the persona's goal.
 
-    1. A COMPLETE JSON PAYLOAD that:
-       - Uses a unique conversationId
-       - Has realistic Argentinian data:
-         * Diverse names (not generic "Cliente Potencial")
-         * Real Argentinian phone numbers (unique per bot, varied area codes)
-         * Valid-looking emails matching the person's name
-         * Contextual metadata about the persona
-       - The payload must follow the sample structure exactly
+    Instructions:
+    - The \`conversationId\` in each \`initialPayload\` must be unique.
+    - The data across the different test cases must be distinct to simulate different users.
+    - The personas and goals must be directly related to the functions of the workflow you analyzed.
+    - Ensure the number of generated personas matches exactly ${testCaseCount}.
 
-    2. A descriptive PERSONA STRING that combines in a natural way:
-       - Age range and occupation
-       - Personality traits
-       - Communication style
-       - Background context
-       Example: "35-year-old tech startup founder, impaciente y directo en su comunicación, busca automatizar procesos de su empresa en crecimiento"
-
-    3. A realistic CONVERSATION GOAL that:
-       - Matches their persona and context
-       - Is specific and achievable via this workflow
-       - Includes their motivation/urgency level
-
-    4. A unique ID and descriptive title for tracking.
-
-    CRITICAL REQUIREMENTS:
-    - Each bot must have COMPLETELY DIFFERENT:
-      * Names (full names, not generic ones)
-      * Phone numbers (unique, real Argentina formats)
-      * Email addresses (matching their names)
-      * Personality traits
-      * Communication styles
-      * Goals and motivations
-    - No duplicate or generic data between bots
-    - Names should be diverse and realistic
-    - Phone numbers should follow +54 format with varied area codes
-    - Each bot should feel like a distinct individual
-
-    Return a JSON array where each object MUST have EXACTLY these fields:
-    {
-      "id": "string - unique identifier",
-      "title": "string - clear descriptive title",
-      "persona": "string - one complete sentence describing the person",
-      "conversationGoal": "string - specific goal description",
-      "initialPayload": {
-        // object matching sample structure with unique data
-      }
-    }
-
-    IMPORTANT: The "persona" field MUST be a single string, not an object.
-
-    Return the result as a JSON array where each object has this exact structure:
-    [
-      {
-        "id": "unique_id_1",
-        "title": "Descriptive Title",
-        "persona": "Personality description",
-        "conversationGoal": "Specific goal",
-        "initialPayload": { /* complete payload matching sample structure */ }
-      }
-    ]
+    Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
     ${getLanguageInstruction(language)}
     `;
 
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-pro',
         contents: prompt,
         config: {
             responseMimeType: "application/json",
         },
-    }), 3, 800);
-
-    if (!response?.text) {
-        throw new Error("Gemini API returned undefined response text for test case generation");
-    }
+    });
     
     try {
         const jsonText = response.text.trim();
-        const testCases = JSON.parse(jsonText);
-
-        // Ensure all required fields are present and use samplePayload as base
-        return testCases.map((tc: any, index: number) => ({
-            id: tc.id || `TC${index + 1}`,
-            title: tc.title || `Test Case ${index + 1}`,
-            persona: tc.persona || `Generic user persona ${index + 1}`,
-            conversationGoal: tc.conversationGoal || `Generic goal ${index + 1}`,
-            initialPayload: tc.initialPayload || { ...samplePayload, conversationId: `conv_${Date.now()}_${index}` }
-        }));
+        return JSON.parse(jsonText);
     } catch (e) {
         console.error("Failed to parse test cases JSON:", response.text);
-        // Fallback: generate basic test cases using the sample payload
-        return Array.from({ length: testCaseCount }, (_, index) => ({
-            id: `TC${index + 1}`,
-            title: `Test Case ${index + 1}`,
-            persona: `User ${index + 1}`,
-            conversationGoal: `Test goal ${index + 1}`,
-            initialPayload: { ...samplePayload, conversationId: `conv_${Date.now()}_${index}` }
-        }));
+        throw new Error("Could not generate valid test cases. The model returned malformed JSON.");
     }
 };
 
@@ -334,35 +237,29 @@ const generateUserMessageText = async (
     ).join('\n\n');
 
     const prompt = `
-    Eres una persona real escribiendo mensajes de WhatsApp. NO eres un bot.
+    You are role-playing as a user in a test scenario.
     
-    Tu personalidad: "${testCase.persona}"
-    Tu objetivo: "${testCase.conversationGoal}"
+    Your Persona: "${testCase.persona}"
+    Your Ultimate Goal: "${testCase.conversationGoal}"
     
-    Historial de la conversación:
-    ${historyString || "(Este es tu primer mensaje.)"}
+    Conversation History So Far:
+    ${historyString || "(This is the first message of the conversation.)"}
     
-    Instrucciones para sonar más humano:
-    - Escribe mensajes CORTOS y naturales, como en WhatsApp (2-3 líneas máximo)
-    - Usa expresiones cotidianas y argentinas
-    - Si estás apurado/a, sé directo/a y breve
-    - Si estás frustrado/a, muéstralo pero sin ser agresivo/a
-    - Incluye errores de tipeo ocasionales y modismos
-    - NUNCA uses lenguaje formal o corporativo
-    - NO escribas párrafos largos ni uses puntos y comas excesivos
-    - Ocasionalmente usa emojis pero no abuses
+    Your Task: Based on your persona, goal, and the conversation history, generate the text for your *next* message.
     
-    IMPORTANTE:
-    - Mantén los mensajes BREVES y NATURALES
-    - Escribe como una PERSONA REAL, no como un bot
+    Instructions:
+    - If this is the first message, start the conversation naturally to work towards your goal.
+    - If there is history, respond to the agent's last message, keeping your persona and goal in mind.
+    - Be realistic. You can be friendly, confused, or frustrated, according to your persona.
+    - Your response should be just the message text, nothing else. No JSON, no labels.
     
     ${getLanguageInstruction(language)}
     `;
 
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
-    }), 3, 500);
+    });
     
     return response.text.trim();
 };
@@ -392,7 +289,7 @@ const checkIfGoalIsMet = async (
     ${getLanguageInstruction(language)}
     `;
 
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
         config: {
@@ -405,7 +302,7 @@ const checkIfGoalIsMet = async (
                 required: ['goalAchieved'],
             }
         }
-    }), 3, 700);
+    });
 
     try {
         const result = JSON.parse(response.text);
@@ -456,7 +353,7 @@ const analyzeResult = async (
     ${getLanguageInstruction(language)}
     `;
 
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-pro',
         contents: prompt,
         config: {
@@ -482,7 +379,7 @@ const analyzeResult = async (
                 required: ['overallScore', 'summary', 'criteriaBreakdown'],
             },
         },
-    }), 3, 1200);
+    });
 
     try {
         const jsonText = response.text.trim();
@@ -507,370 +404,124 @@ export const runFullAudit = async (
   onAllComplete: CompletionCallback,
   language: string,
 ) => {
-    console.log('🚀 Iniciando auditoría del call center...');
-    console.log('📋 Configuración:', { testCaseCount: config.testCaseCount, auditType: config.auditType, endpointUrl: config.endpointUrl });
-
-    onProgress({ message: `🎯 Iniciando auditoría con ${config.testCaseCount} agentes...` });
+    onProgress({ message: `Generating ${config.testCaseCount} test case personas...` });
     const testCases = await generateTestCases(config, language);
 
     if (config.auditType === 'real') {
         if (!config.endpointUrl) {
-            throw new Error("URL del endpoint no configurada para auditoría real.");
+            throw new Error("Endpoint URL is not configured for real audit.");
         }
 
-        if (!config.samplePayload) {
-            throw new Error("Payload de ejemplo no configurado. Por favor carga un archivo de workflow n8n.");
-        }
-
-        console.log('📋 Payload de ejemplo del workflow:', config.samplePayload);
-
-        // Initialize call center agents
-        const agents: CallCenterAgent[] = testCases.map((testCase, index) => ({
-            id: `AGENT_${index + 1}_${testCase.id.slice(-6)}`,
-            testCase,
+        let conversations: ConversationState[] = testCases.map(tc => ({
+            testCase: tc,
             history: [],
-            isActive: true,
-            currentTurn: 0,
-            status: 'WAITING',
-            conversationGoal: testCase.conversationGoal,
-            personality: testCase.persona
+            isComplete: false,
+            finalStatus: 'PENDING',
         }));
 
-        const initialAgentsStatus = agents.map(a => ({
-            id: a.id,
-            testCase: a.testCase,
-            status: a.status,
-            currentTurn: a.currentTurn,
-            history: a.history
-        }));
+        for (let turnCount = 1; turnCount <= MAX_CONVERSATION_TURNS; turnCount++) {
+            const activeConversations = conversations.filter(c => !c.isComplete);
+            if (activeConversations.length === 0) {
+                onProgress({ message: "All conversations have been completed." });
+                break;
+            }
 
-        onProgress({
-            message: `📞 Call Center Inicializado - ${agents.length} agentes listos`,
-            trace: {
-                id: 'system',
-                testCase: {
-                    id: 'system',
-                    title: 'System',
-                    persona: 'System',
-                    conversationGoal: 'System initialization',
-                    initialPayload: config.samplePayload || {}
-                },
-                executionTrace: [],
-                analysis: { overallScore: 0, summary: `Initialized ${agents.length} agents`, criteriaBreakdown: [] },
-                finalStatus: 'SUCCESS'
-            },
-            agents: initialAgentsStatus
-        });
+            onProgress({ message: `Starting Round ${turnCount} for ${activeConversations.length} active conversation(s)...` });
 
-        // Show initial status of all agents
-        const initialStatus = agents.map(agent =>
-            `🟡 ${agent.id}: ${agent.testCase.title}`
-        ).join('\n');
+            // 1. Generate all messages for this round
+            const messageGenerationPromises = activeConversations.map(conv =>
+                generateUserMessageText(conv.testCase, conv.history, language)
+            );
+            const userMessageTexts = await Promise.all(messageGenerationPromises);
+            onProgress({ message: `Generated messages for Round ${turnCount}. Now sending to endpoint...` });
 
-        onProgress({
-            message: `📊 Estado Inicial del Call Center:\n${initialStatus}`,
-            trace: {
-                id: 'system',
-                testCase: {
-                    id: 'system',
-                    title: 'System',
-                    persona: 'System',
-                    conversationGoal: 'System initialization',
-                    initialPayload: config.samplePayload || {}
-                },
-                executionTrace: [],
-                analysis: { overallScore: 0, summary: `All agents ready`, criteriaBreakdown: [] },
-                finalStatus: 'SUCCESS'
-            },
-            agents: initialAgentsStatus
-        });
-
-        // Process each agent independently
-        const agentPromises = agents.map(async (agent, index) => {
-            console.log(`🎬 Iniciando agente ${agent.id}: ${agent.testCase.title}`);
-
-            let conversationComplete = false;
-            let turnCount = 0;
-
-            // Add small random delay to make execution more realistic
-            const initialDelay = Math.random() * 1000;
-            await new Promise(resolve => setTimeout(resolve, initialDelay));
-
-            while (!conversationComplete && turnCount < MAX_CONVERSATION_TURNS && agent.isActive) {
-                turnCount++;
-                agent.currentTurn = turnCount;
-                agent.status = 'THINKING';
-
-                    // Update progress with all agents status - sin generar análisis preliminar
-        const allAgentsStatus = agents.map(a => ({
-            id: a.id,
-            testCase: a.testCase,
-            status: a.status,
-            currentTurn: a.currentTurn,
-            history: a.history
-        }));
-
-        // Solo enviamos el estado actual sin análisis
-        onProgress({
-            message: `🤖 ${agent.id}: Pensando siguiente mensaje (turno ${turnCount})...`,
-            agents: allAgentsStatus
-        });                try {
-                    // Generate contextual message based on conversation history
-                    const userMessage = await generateUserMessageText(agent.testCase, agent.history, language);
-
-                    agent.status = 'SENDING';
-
-                onProgress({
-                    message: `📤 ${agent.id}: Enviando mensaje - "${userMessage.substring(0, 50)}..."`,
-                    agents: allAgentsStatus
-                });                    // Prepare payload using the bot's unique initial payload
-                    const payloadWithMessage = { 
-                        ...agent.testCase.initialPayload, // Use bot's specific payload from test case
-                        conversationId: agent.testCase.id  // Ensure unique conversation ID
-                    };
-
-                    // Find the message field in the payload structure
-                    const messageKey = Object.keys(agent.testCase.initialPayload).find(k =>
-                        k.toLowerCase().includes('message') ||
-                        k.toLowerCase().includes('text') ||
-                        k.toLowerCase().includes('query') ||
-                        k.toLowerCase().includes('input')
-                    ) || 'message';
-
-                    // Update message while keeping bot's unique data
-                    payloadWithMessage[messageKey] = userMessage;
-
-                    console.log(`📤 ${agent.id} - Sending to endpoint:`, JSON.stringify(payloadWithMessage, null, 2));
-
-                    // Send message and wait for response
+            // 2. Prepare and send all requests for this round
+            const fetchPromises = activeConversations.map((conv, index) => {
                 const turnStartTime = Date.now();
+                const messageText = userMessageTexts[index];
+                
+                const basePayload = { ...conv.testCase.initialPayload, conversationId: conv.testCase.id };
+                const messageKey = Object.keys(basePayload).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query')) || 'message';
+                const userInput = { ...basePayload, [messageKey]: messageText };
 
-                    const response = await withRetries(() => fetch(config.endpointUrl!, {
+                return fetch(config.endpointUrl!, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payloadWithMessage)
-                    }), 3, 500);
-
-                    if (!response.ok) {
-                        // Try to capture any textual error body for debugging
-                        let errText = '';
-                        try { errText = await response.text(); } catch (_) { errText = ''; }
-                        throw new Error(`HTTP ${response.status}: ${response.statusText}${errText ? ` - ${errText}` : ''}`);
-                    }
-
-                    // Read response as text first and try to parse as JSON. Many endpoints may return
-                    // empty bodies or plain text which would cause response.json() to throw.
-                    let responseData: any = null;
-                    let rawResponseText: string | null = null;
-                    try {
-                        rawResponseText = await response.text();
-                        if (rawResponseText && rawResponseText.trim().length > 0) {
-                            try {
-                                responseData = JSON.parse(rawResponseText);
-                            } catch (e) {
-                                // Not valid JSON — keep the raw text so callers can inspect it
-                                console.warn(`Non-JSON response for ${agent.id} turn ${turnCount}:`, rawResponseText.slice(0, 300));
-                                responseData = rawResponseText;
-                            }
-                        } else {
-                            // Empty body
-                            console.warn(`Empty response body for ${agent.id} turn ${turnCount}`);
-                            responseData = null;
-                        }
-                    } catch (e) {
-                        console.error(`Failed to read response body for ${agent.id} turn ${turnCount}:`, e instanceof Error ? e.message : e);
-                        responseData = null;
-                    }
-
+                    body: JSON.stringify(userInput)
+                })
+                .then(async response => {
                     const durationMs = Date.now() - turnStartTime;
-
-                    // Add to conversation history with context
-                    const conversationEntry: ExecutionStep = {
-                        nodeId: `Turn_${turnCount}`,
-                        status: 'SUCCESS',
-                        input: {
-                            ...payloadWithMessage,
-                            _metadata: JSON.stringify({
-                                botPersona: agent.testCase.persona,
-                                conversationGoal: agent.testCase.conversationGoal,
-                                currentTurn: turnCount
-                            })
-                        },
-                        output: responseData,
-                        log: `Turn ${turnCount} completed successfully by ${agent.testCase.title}`,
-                        durationMs
-                    };
-
-                    agent.history.push(conversationEntry);
-                    agent.status = 'WAITING_RESPONSE';
-
-                    onProgress({
-                        message: `📥 ${agent.id}: Respuesta recibida (${durationMs}ms)`,
-                        agents: allAgentsStatus
-                    });
-
-                    // Check if goal is achieved
-                    const goalAchieved = await checkIfGoalIsMet(agent.testCase, agent.history, language);
-
-                    if (goalAchieved) {
-                        agent.status = 'COMPLETED';
-                        agent.isActive = false;
-                        conversationComplete = true;
-
-                        onProgress({
-                            message: `✅ ${agent.id}: ¡Objetivo cumplido! Conversación completada en ${turnCount} turnos.`,
-                            agents: allAgentsStatus
-                        });
-
-                    } else if (turnCount >= MAX_CONVERSATION_TURNS) {
-                        agent.status = 'COMPLETED';
-                        agent.isActive = false;
-                        conversationComplete = true;
-
-                        onProgress({
-                            message: `⏰ ${agent.id}: Límite de turnos alcanzado (${MAX_CONVERSATION_TURNS}). Conversación finalizada.`,
-                            agents: allAgentsStatus
-                        });
-
-                    } else {
-                        // Continue conversation - add delay before next message
-                        const delayTime = 2000 + Math.random() * 3000; // 2-5 seconds
-                        agent.status = 'WAITING';
-
-                        onProgress({
-                            message: `⏳ ${agent.id}: Esperando ${Math.round(delayTime/1000)}s antes del siguiente mensaje...`,
-                            agents: allAgentsStatus
-                        });
-
-                        await new Promise(resolve => setTimeout(resolve, delayTime));
+                    if (!response.ok) {
+                        throw new Error(`Endpoint returned status ${response.status}: ${response.statusText}`);
                     }
+                    const responseData = await response.json();
+                    return { status: 'SUCCESS' as const, output: responseData, input: userInput, log: `Success on Round ${turnCount}.`, durationMs };
+                })
+                .catch(error => {
+                    const durationMs = Date.now() - turnStartTime;
+                    const logMessage = error instanceof Error ? error.message : "An unknown network error occurred.";
+                    return { status: 'ERROR' as const, output: null, input: userInput, log: logMessage, durationMs };
+                });
+            });
 
-                } catch (error) {
-                    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-                    console.error(`❌ ${agent.id} - Error:`, errorMessage);
+            const turnResults = await Promise.all(fetchPromises);
+            onProgress({ message: `Received all responses for Round ${turnCount}. Processing results...` });
 
-                    // Add error to history
-                    const errorEntry: ExecutionStep = {
-                        nodeId: `Turn_${turnCount}_ERROR`,
-                        status: 'ERROR',
-                        input: agent.history.length > 0 ? agent.history[agent.history.length - 1].input : null,
-                        output: null,
-                        log: errorMessage,
-                        durationMs: 0
-                    };
-
-                    agent.history.push(errorEntry);
-                    agent.status = 'ERROR';
-                    agent.isActive = false;
-                    conversationComplete = true;
-
-                    onProgress({
-                        message: `❌ ${agent.id}: Error en la conversación - ${errorMessage}`,
-                        agents: allAgentsStatus
-                    });
+            // 3. Update conversation states with the results
+            activeConversations.forEach((conv, index) => {
+                const result = turnResults[index];
+                conv.history.push({
+                    nodeId: `Turn ${turnCount}`,
+                    ...result,
+                });
+                if (result.status === 'ERROR') {
+                    conv.isComplete = true;
+                    conv.finalStatus = 'ERROR';
+                    onProgress({ message: `Conversation "${conv.testCase.title}" failed with an error.` });
                 }
+            });
+
+            // 4. Check for goal completion on successful turns
+            const successfulConversations = activeConversations.filter((c, i) => turnResults[i].status === 'SUCCESS');
+            if (successfulConversations.length > 0) {
+                 const goalCheckPromises = successfulConversations.map(conv =>
+                    checkIfGoalIsMet(conv.testCase, conv.history, language)
+                        .then(isMet => ({ testCaseId: conv.testCase.id, isMet }))
+                );
+                const goalCompletionResults = await Promise.all(goalCheckPromises);
+
+                goalCompletionResults.forEach(goalResult => {
+                    if (goalResult.isMet) {
+                        const conversation = conversations.find(c => c.testCase.id === goalResult.testCaseId);
+                        if (conversation && !conversation.isComplete) {
+                            conversation.isComplete = true;
+                            conversation.finalStatus = 'SUCCESS';
+                            onProgress({ message: `Goal met for "${conversation.testCase.title}". Conversation finished.` });
+                        }
+                    }
+                });
             }
+        } // End of main loop
 
-            console.log(`🏁 ${agent.id} - Conversación finalizada. Estado: ${agent.status}, Turnos: ${turnCount}`);
+        onProgress({ message: "All conversation rounds complete. Analyzing final results..." });
 
-            // Return final result for this agent
-            const finalStatus = agent.status === 'COMPLETED' ? 'SUCCESS' : 'ERROR';
-            return {
-                id: agent.testCase.id,
-                testCase: agent.testCase,
-                executionTrace: agent.history,
+        const analysisPromises = conversations.map(async conv => {
+            // FIX: The `finalStatus` for an `AuditResult` must be 'SUCCESS' or 'ERROR'. A 'PENDING' status
+            // implies the conversation reached its turn limit without a definitive outcome, which is
+            // considered a 'SUCCESS' for the purpose of this analysis.
+            const finalStatus = conv.finalStatus === 'PENDING' ? 'SUCCESS' : conv.finalStatus;
+            const analysis = await analyzeResult(config, { id: conv.testCase.id, testCase: conv.testCase, executionTrace: conv.history, finalStatus }, language);
+            const result: AuditResult = {
+                id: conv.testCase.id,
+                testCase: conv.testCase,
+                executionTrace: conv.history,
                 finalStatus,
-                agentId: agent.id
+                analysis
             };
+            onResultComplete(result);
         });
 
-        // Wait for all agents to complete
-        onProgress({ message: `🔄 Esperando que todos los agentes completen sus conversaciones...` });
-
-        // Esperamos a que todas las conversaciones terminen
-        const agentResults = await Promise.all(agentPromises);
-
-        // Dar un momento para que se procesen todos los estados finales
-        await delay(1000);
-        
-        // Ahora sí analizamos los resultados
-        onProgress({ message: `📊 Analizando resultados de ${agentResults.length} conversaciones...` });
-
-        // Esperamos a que todas las conversaciones terminen antes de analizar
-        for (const agentResult of agentResults) {
-            try {
-                const analysis = await analyzeResult(config, {
-                    id: agentResult.id,
-                    testCase: agentResult.testCase,
-                    executionTrace: agentResult.executionTrace,
-                    finalStatus: agentResult.finalStatus as 'SUCCESS' | 'ERROR'
-                }, language);
-
-                const result: AuditResult = {
-                    id: agentResult.id,
-                    testCase: agentResult.testCase,
-                    executionTrace: agentResult.executionTrace,
-                    finalStatus: agentResult.finalStatus as 'SUCCESS' | 'ERROR',
-                    analysis
-                };
-
-                // Guardar historial en archivo JSON
-                try {
-                  const historyDir = path.resolve(__dirname, '../history');
-                  if (!fs.existsSync(historyDir)) {
-                    fs.mkdirSync(historyDir);
-                  }
-                  const filePath = path.join(historyDir, `${result.id}.json`);
-                  fs.writeFileSync(filePath, JSON.stringify(result, null, 2), 'utf-8');
-                } catch (err) {
-                  console.error('No se pudo guardar el historial del test:', err);
-                }
-
-                // Notificar el resultado completo solo cuando el análisis está listo
-                onResultComplete(result);
-                
-                // Actualizar progreso
-                onProgress({ 
-                    message: `✅ Análisis completado para ${agentResult.id}`,
-                    agents: agents.map(a => ({
-                        id: a.id,
-                        testCase: a.testCase,
-                        status: a.status,
-                        currentTurn: a.currentTurn,
-                        history: a.history
-                    }))
-                });
-
-            } catch (error) {
-                console.error(`Error analizando resultados para ${agentResult.id}:`, error);
-                onProgress({ 
-                    message: `❌ Error en análisis de ${agentResult.id}: ${error instanceof Error ? error.message : 'Error desconocido'}`
-                });
-            }
-        }
-
-        // Show final summary
-        const successfulConversations = agentResults.filter(r => r.finalStatus === 'SUCCESS').length;
-        const totalConversations = agentResults.length;
-
-        const completionSummary = agentResults.map(result => {
-            const agent = agents.find(a => a.testCase.id === result.id);
-            return `${agent?.id}: ${result.testCase.title} - ${result.finalStatus === 'SUCCESS' ? '✅' : '❌'}`;
-        }).join('\n');
-
-        const finalAgentsStatus = agents.map(a => ({
-            id: a.id,
-            testCase: a.testCase,
-            status: a.status,
-            currentTurn: a.currentTurn,
-            history: a.history
-        }));
-
-        onProgress({
-            message: `🎉 Call Center Completado!\n📊 Resumen: ${successfulConversations}/${totalConversations} exitosas\n\n${completionSummary}\n\n🔄 Generando reportes finales...`,
-            agents: finalAgentsStatus
-        });
-
+        await Promise.all(analysisPromises);
         onAllComplete();
 
     } else {
@@ -911,7 +562,7 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], connections
     ${getLanguageInstruction(language)}
     `;
 
-    const response = await withRetries(() => ai.models.generateContent({
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
         config: {
@@ -921,7 +572,7 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], connections
                 items: { type: Type.STRING },
             },
         },
-    }), 3, 800);
+    });
 
     try {
         const jsonText = response.text.trim();
