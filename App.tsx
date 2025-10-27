@@ -1,16 +1,17 @@
-import React, { useState, useCallback } from 'react';
-import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow } from './types';
+import React, { useState, useCallback, useEffect } from 'react';
+import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit } from './types';
 import AgentConfig from './components/AgentConfig';
 import AuditReport from './components/AuditReport';
-import { runFullAudit } from './services/geminiService';
+import { generateTestCases, runFullAudit } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
 import { useTranslation } from './hooks/useTranslation';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import ExecutionCanvas from './components/ExecutionCanvas';
-import CallCenterConsole from './components/CallCenterConsole';
 import Card from './components/Card';
 import AuditProgress from './components/AuditProgress';
+import * as historyService from './services/historyService';
+import LiveAuditView from './components/LiveAuditView';
 
 const App: React.FC = () => {
   const [auditStatus, setAuditStatus] = useState<AuditStatus>(AuditStatus.CONFIG);
@@ -20,17 +21,39 @@ const App: React.FC = () => {
   const [n8nNodeData, setN8nNodeData] = useState<ParsedN8nWorkflow | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
   const [currentTrace, setCurrentTrace] = useState<AuditResult | null>(null);
-  const [agents, setAgents] = useState<any[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const { t, language } = useTranslation();
 
-  const handleProgressUpdate = useCallback((update: { message: string, trace?: AuditResult, agents?: any[] }) => {
+  // New state for live audit view
+  const [liveAuditData, setLiveAuditData] = useState<AuditResult[]>([]);
+  const [liveLogs, setLiveLogs] = useState<string[]>([]);
+  const [isViewingHistory, setIsViewingHistory] = useState(false);
+
+  useEffect(() => {
+    // Save the audit automatically when it's finished and not a history view
+    if (auditStatus === AuditStatus.REPORT_READY && auditConfig && auditResults.length > 0 && !isViewingHistory) {
+      historyService.saveAudit(auditConfig, auditResults);
+    }
+  }, [auditStatus, auditConfig, auditResults, isViewingHistory]);
+
+  const handleProgressUpdate = useCallback((update: { message: string, trace?: AuditResult, testCaseId?: string, step?: ExecutionStep }) => {
     setProgressMessage(update.message);
-    if(update.trace) {
+    setLiveLogs(prev => [...prev, update.message]);
+    
+    if(update.trace) { // For visual audit
       setCurrentTrace(update.trace);
     }
-    if(update.agents) {
-      setAgents(update.agents);
+    
+    if(update.testCaseId && update.step) { // For real audit
+      setLiveAuditData(prevData => {
+        const newData = [...prevData];
+        const caseIndex = newData.findIndex(item => item.id === update.testCaseId);
+        if (caseIndex !== -1) {
+            const newTrace = [...newData[caseIndex].executionTrace, update.step];
+            newData[caseIndex] = { ...newData[caseIndex], executionTrace: newTrace };
+        }
+        return newData;
+      });
     }
   }, []);
 
@@ -50,11 +73,26 @@ const App: React.FC = () => {
     setErrorMessage('');
     setImprovementData(null);
     setCurrentTrace(null);
-    setAgents([]);
+    setLiveLogs([]);
 
     try {
+      handleProgressUpdate({ message: `Generating ${data.config.testCaseCount} test case personas...` });
+      const testCases = await generateTestCases(data.config, language);
+
+      if (data.config.auditType === 'real') {
+         const initialLiveResults: AuditResult[] = testCases.map(tc => ({
+            id: tc.id,
+            testCase: tc,
+            executionTrace: [],
+            analysis: { overallScore: 0, summary: t('auditInProgress'), criteriaBreakdown: [] },
+            finalStatus: 'SUCCESS', // Temporary
+         }));
+         setLiveAuditData(initialLiveResults);
+      }
+
       await runFullAudit(
         data.config,
+        testCases,
         handleProgressUpdate,
         handleResultComplete,
         handleAllComplete,
@@ -79,7 +117,16 @@ const App: React.FC = () => {
     setProgressMessage('');
     setCurrentTrace(null);
     setErrorMessage('');
-    setAgents([]);
+    setLiveAuditData([]);
+    setLiveLogs([]);
+    setIsViewingHistory(false);
+  };
+
+  const handleViewHistory = (item: HistoricalAudit) => {
+    setAuditConfig(item.config);
+    setAuditResults(item.results);
+    setAuditStatus(AuditStatus.REPORT_READY);
+    setIsViewingHistory(true);
   };
 
   const renderContent = () => {
@@ -97,20 +144,17 @@ const App: React.FC = () => {
                 onReset={handleReset}
             />;
         }
-
-        // For 'real' audit type - use CallCenterConsole if we have agents info
-        if (auditConfig.auditType === 'real' && agents.length > 0) {
-            return <CallCenterConsole
-                agents={agents}
-                message={progressMessage}
-                totalCases={auditConfig.testCaseCount}
-                completedCases={auditResults.length}
-                onReset={handleReset}
-            />;
+        if (auditConfig.auditType === 'real') {
+          return <LiveAuditView 
+              results={liveAuditData} 
+              logs={liveLogs} 
+              onCancel={handleReset} 
+              totalCases={auditConfig.testCaseCount}
+              completedCases={auditResults.length}
+          />
         }
-
-        // Fallback for 'real' audit type without agents info yet
-        return <AuditProgress
+        // Fallback for visual audit without n8n data
+        return <AuditProgress 
             message={progressMessage}
             totalCases={auditConfig.testCaseCount}
             completedCases={auditResults.length}
@@ -118,7 +162,7 @@ const App: React.FC = () => {
         />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
-        return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} />;
+        return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} isHistoryView={isViewingHistory} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !auditResults.length || !auditConfig) {
             return (
@@ -149,16 +193,20 @@ const App: React.FC = () => {
         );
       case AuditStatus.CONFIG:
       default:
-        return <AgentConfig onStartAudit={handleStartAudit} />;
+        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} />;
     }
   };
   
-  if (auditStatus === AuditStatus.AUDITING) {
+  if (auditStatus === AuditStatus.AUDITING && auditConfig?.auditType !== 'real') {
       return (
         <div className="w-screen h-screen bg-gray-100 dark:bg-gray-900 overflow-hidden">
             {renderContent()}
         </div>
       )
+  }
+  
+  if (auditStatus === AuditStatus.AUDITING && auditConfig?.auditType === 'real') {
+    return renderContent();
   }
 
   return (

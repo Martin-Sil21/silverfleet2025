@@ -1,3 +1,4 @@
+
 {
   "appTitle": "AI Agent Auditor",
   "appDescription": "A professional workbench to visually debug, test, and evaluate your n8n workflows with real, step-by-step execution analysis.",
@@ -89,6 +90,18 @@
   "progress": "Progress",
   "cancelAudit": "Cancel Audit",
   "personaLabel": "Persona",
+  "personaGoal": "Goal",
+  "finalStatusLabel": "Final Status",
   "userTurnTitle": "User (Turn {turn})",
-  "agentResponseTitle": "Agent Response"
+  "agentResponseTitle": "Agent Response",
+  "auditHistoryTitle": "Audit History",
+  "auditHistoryDescription": "Review results from previous audit sessions.",
+  "noHistory": "No past audits found. Run your first audit to see it here!",
+  "viewReport": "View Report",
+  "delete": "Delete",
+  "confirmDelete": "Are you sure you want to delete this audit report? This action cannot be undone.",
+  "liveAuditTitle": "Live Audit Feed",
+  "liveAuditDescription": "Monitoring real-time conversations with the AI agent.",
+  "backToConfig": "Back to Configuration",
+  "corsWarning": "Your endpoint must be configured to allow cross-origin requests (CORS) from this application. If the test fails with a network error, check your n8n webhook's response headers."
 }

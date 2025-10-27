@@ -1,10 +1,10 @@
+
 import React, { useState, useMemo } from 'react';
-import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection } from '../types';
+import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection, HistoricalAudit } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';
 import Card from './Card';
 import { parseN8nWorkflow } from '../services/n8nParser';
 import { UploadIcon } from './icons/UploadIcon';
-import { TrashIcon } from './icons/TrashIcon';
 import { useTranslation } from '../hooks/useTranslation';
 import { XCircleIcon } from './icons/XCircleIcon';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
@@ -13,12 +13,15 @@ import { suggestAuditCriteria, generateSamplePayload } from '../services/geminiS
 import Loader from './Loader';
 import { EyeIcon } from './icons/EyeIcon';
 import { BoltIcon } from './icons/BoltIcon';
+import AuditHistory from './AuditHistory';
+import { ExclamationTriangleIcon } from './icons/ExclamationTriangleIcon';
 
 interface AgentConfigProps {
   onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => void;
+  onViewHistory: (item: HistoricalAudit) => void;
 }
 
-const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
+const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }) => {
   const { t, language } = useTranslation();
   
   const DEFAULT_CRITERIA = useMemo(() => [
@@ -66,17 +69,24 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     }
   };
 
-  const findUrlInObject = (obj: any): string | null => {
-    if (!obj || typeof obj !== 'object') return null;
-    for (const key of Object.keys(obj)) {
-      const val = obj[key];
-      if (typeof val === 'string' && (val.startsWith('http://') || val.startsWith('https://'))) return val;
-      if (typeof val === 'object') {
-        const nested = findUrlInObject(val);
-        if (nested) return nested;
-      }
+  const handleGeneratePayload = async (workflowForGen?: WorkflowNode[], connectionsForGen?: N8nConnection[]) => {
+    const wf = workflowForGen || workflow;
+    const conns = connectionsForGen || connections;
+
+    if (!wf || wf.length === 0 || !conns) return;
+
+    setIsGeneratingPayload(true);
+    setPayloadError(null);
+    try {
+      const payload = await generateSamplePayload(wf, conns, language);
+      setSamplePayload(payload);
+      setRawPayloadText(JSON.stringify(payload, null, 2));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not generate payload.";
+      setPayloadError(message);
+    } finally {
+      setIsGeneratingPayload(false);
     }
-    return null;
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -99,35 +109,9 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         if (!text) throw new Error("File is empty.");
         
         const parsedWorkflow = parseN8nWorkflow(text);
-
-        // Auto-configure endpoint if detected
         if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
             setEndpointUrl(parsedWorkflow.detectedEndpoints[0]);
-            setTestStatus('idle');
-            setTestMessage('');
-            console.log('✅ Webhook detectado automáticamente:', parsedWorkflow.detectedEndpoints[0]);
         }
-
-    // Auto-configure sample payload if detected
-    if (parsedWorkflow.detectedSamplePayload) {
-      setSamplePayload(parsedWorkflow.detectedSamplePayload);
-      setRawPayloadText(JSON.stringify(parsedWorkflow.detectedSamplePayload, null, 2));
-      setPayloadError(null);
-      console.log('✅ Payload de muestra detectado automáticamente:', parsedWorkflow.detectedSamplePayload);
-      // If endpoint is not set yet, try to populate it from detected endpoints or payload
-      if (!endpointUrl) {
-        if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
-          setEndpointUrl(parsedWorkflow.detectedEndpoints[0]);
-          console.log('✅ Endpoint auto-detectado desde el workflow:', parsedWorkflow.detectedEndpoints[0]);
-        } else {
-          const found = findUrlInObject(parsedWorkflow.detectedSamplePayload);
-          if (found) {
-            setEndpointUrl(found);
-            console.log('✅ Endpoint inferido desde el payload de muestra:', found);
-          }
-        }
-      }
-    }
         
         const newWorkflow: WorkflowNode[] = parsedWorkflow.nodes.map(node => {
           if (node.nodeType === 'agent' && node.systemPrompt) {
@@ -151,35 +135,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         setConnections(parsedWorkflow.connections);
         setParsedN8nData(parsedWorkflow);
         fetchAndSetCriteria(newWorkflow, parsedWorkflow.connections);
-    // If endpoint wasn't detected previously, try to extract from the first node parameters (hook may be there)
-    if (!endpointUrl && parsedWorkflow.nodes && parsedWorkflow.nodes.length > 0) {
-      const first = parsedWorkflow.nodes[0];
-      try {
-        // Pattern A: httpHost + path
-        const path = first.parameters?.path;
-        const httpHost = first.parameters?.httpHost;
-        if (httpHost && path) {
-          const built = (httpHost.startsWith('http') ? httpHost : `https://${httpHost}`) + path;
-          setEndpointUrl(built);
-          console.log('✅ Endpoint inferido desde el primer nodo (httpHost+path):', built);
-        } else if (first.parameters?.url) {
-          setEndpointUrl(first.parameters.url);
-          console.log('✅ Endpoint inferido desde el primer nodo (url):', first.parameters.url);
-        } else if (first.parameters?.webhookId) {
-          const built = `https://silverfleet.com.ar/webhook/${first.parameters.webhookId}`;
-          setEndpointUrl(built);
-          console.log('✅ Endpoint inferido desde el primer nodo (webhookId):', built);
-        } else {
-          const found = findUrlInObject(first.parameters);
-          if (found) {
-            setEndpointUrl(found);
-            console.log('✅ Endpoint inferido escaneando parámetros del primer nodo:', found);
-          }
-        }
-      } catch (e) {
-        // ignore extraction errors
-      }
-    }
+        handleGeneratePayload(newWorkflow, parsedWorkflow.connections);
       } catch (error) {
         const message = error instanceof Error ? error.message : "An unknown error occurred during parsing.";
         setFileError(message);
@@ -204,19 +160,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
         setRawPayloadText(text);
         const parsedPayload = JSON.parse(text);
         setSamplePayload(parsedPayload);
-        // If endpoint not set yet, try to infer from parsed payload or parsedN8nData
-        if (!endpointUrl) {
-            if (parsedN8nData?.detectedEndpoints && parsedN8nData.detectedEndpoints.length > 0) {
-                setEndpointUrl(parsedN8nData.detectedEndpoints[0]);
-                console.log('✅ Endpoint auto-detectado desde el workflow (al subir payload):', parsedN8nData.detectedEndpoints[0]);
-            } else {
-                const found = findUrlInObject(parsedPayload);
-                if (found) {
-                    setEndpointUrl(found);
-                    console.log('✅ Endpoint inferido desde el payload subido:', found);
-                }
-            }
-        }
       } catch (error) {
         setPayloadError(t('payloadError'));
         setSamplePayload(null);
@@ -225,35 +168,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
     reader.onerror = () => setPayloadError("Failed to read the payload file.");
     reader.readAsText(file);
     event.target.value = '';
-  };
-  
-  const handleGeneratePayload = async () => {
-      if(!workflow || !connections) return;
-      setIsGeneratingPayload(true);
-      setPayloadError(null);
-      try {
-          const payload = await generateSamplePayload(workflow, connections, language);
-          setSamplePayload(payload);
-          setRawPayloadText(JSON.stringify(payload, null, 2));
-      // If endpoint not set, try to populate it from parsedN8nData or payload content
-      if (!endpointUrl) {
-        if (parsedN8nData?.detectedEndpoints && parsedN8nData.detectedEndpoints.length > 0) {
-          setEndpointUrl(parsedN8nData.detectedEndpoints[0]);
-          console.log('✅ Endpoint auto-detectado desde el workflow (al generar payload):', parsedN8nData.detectedEndpoints[0]);
-        } else {
-          const found = findUrlInObject(payload);
-          if (found) {
-            setEndpointUrl(found);
-            console.log('✅ Endpoint inferido desde el payload generado:', found);
-          }
-        }
-      }
-      } catch (error) {
-          const message = error instanceof Error ? error.message : "Could not generate payload.";
-          setPayloadError(message);
-      } finally {
-          setIsGeneratingPayload(false);
-      }
   };
 
   const handlePayloadTextChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -371,91 +285,103 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit }) => {
 
   return (
     <>
-      <Card className="mb-8">
-         <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('importN8nTitle')}</h2>
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          {t('importN8nDescription')}
-        </p>
-        <div className="relative border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center hover:border-primary-500 dark:hover:border-primary-400 transition-colors">
-          <UploadIcon className="mx-auto h-12 w-12 text-gray-400" />
-          <label htmlFor="file-upload" className="mt-2 block text-sm font-semibold text-primary-600 hover:text-primary-500 cursor-pointer">
-            <span>{parsedN8nData ? t('uploadSuccess') : t('uploadFile')}</span>
-            <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".json" onChange={handleFileChange} />
-          </label>
-          <p className="text-xs text-gray-500 dark:text-gray-400">{t('uploadHint')}</p>
-        </div>
-        {fileError && (
-          <div className="mt-4 text-center p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg">
-            <p>{fileError}</p>
-          </div>
-        )}
-      </Card>
-
-      {parsedN8nData && (
-        <Card className="mb-8">
-            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('samplePayloadTitle')}</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('samplePayloadDescription')}</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-4">
-                    <label htmlFor="payload-upload" className="w-full text-center cursor-pointer bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 font-bold py-3 px-4 rounded-lg transition">
-                        <span>{samplePayload ? t('uploadPayloadSuccess') : t('uploadPayload')}</span>
-                        <input id="payload-upload" type="file" className="sr-only" accept=".json" onChange={handlePayloadFileChange} />
-                    </label>
-                    <button type="button" onClick={handleGeneratePayload} disabled={isGeneratingPayload} className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-not-allowed">
-                        {isGeneratingPayload ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
-                        {isGeneratingPayload ? t('suggestingPayload') : t('suggestPayload')}
-                    </button>
-                </div>
-                <div>
-                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('payloadPreviewTitle')}</label>
-                     <textarea
-                        value={rawPayloadText}
-                        onChange={handlePayloadTextChange}
-                        placeholder={t('payloadPreviewPlaceholder')}
-                        className={`w-full h-40 p-2 font-mono text-xs bg-gray-50 dark:bg-gray-700 border rounded-md resize-none transition-colors focus:outline-none focus:ring-2 ${
-                            isPayloadInvalid
-                            ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
-                            : 'border-gray-300 dark:border-gray-600 focus:border-primary-500 focus:ring-primary-500'
-                        }`}
-                    />
-                </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2 space-y-8">
+          <Card>
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('importN8nTitle')}</h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              {t('importN8nDescription')}
+            </p>
+            <div className="relative border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center hover:border-primary-500 dark:hover:border-primary-400 transition-colors">
+              <UploadIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <label htmlFor="file-upload" className="mt-2 block text-sm font-semibold text-primary-600 hover:text-primary-500 cursor-pointer">
+                <span>{parsedN8nData ? t('uploadSuccess') : t('uploadFile')}</span>
+                <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".json" onChange={handleFileChange} />
+              </label>
+              <p className="text-xs text-gray-500 dark:text-gray-400">{t('uploadHint')}</p>
             </div>
-             {payloadError && (
+            {fileError && (
               <div className="mt-4 text-center p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg">
-                <p>{payloadError}</p>
+                <p>{fileError}</p>
               </div>
             )}
-        </Card>
-      )}
-      
-      {parsedN8nData && (
-        <Card className="mb-8">
-            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('endpointTestTitle')}</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('endpointTestDescription')}</p>
-            <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                    type="url"
-                    className="flex-grow p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
-                    value={endpointUrl}
-                    onChange={handleUrlChange}
-                    placeholder={t('endpointUrlPlaceholder')}
-                />
-                <button 
-                    type="button" 
-                    onClick={handleTestEndpoint} 
-                    disabled={testStatus === 'testing' || !endpointUrl || !samplePayload}
-                    className="px-4 py-2 bg-primary-600 text-white font-semibold rounded-lg shadow-sm hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                    {testStatus === 'testing' ? t('testingEndpoint') : t('testEndpointButton')}
-                </button>
-            </div>
-             <div className="mt-3 min-h-[24px]">
-                {renderTestStatus()}
-            </div>
-        </Card>
-      )}
+          </Card>
+
+          {parsedN8nData && (
+            <Card>
+                <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('samplePayloadTitle')}</h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('samplePayloadDescription')}</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-4">
+                        <label htmlFor="payload-upload" className="w-full text-center cursor-pointer bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 font-bold py-3 px-4 rounded-lg transition">
+                            <span>{samplePayload ? t('uploadPayloadSuccess') : t('uploadPayload')}</span>
+                            <input id="payload-upload" type="file" className="sr-only" accept=".json" onChange={handlePayloadFileChange} />
+                        </label>
+                        <button type="button" onClick={() => handleGeneratePayload()} disabled={isGeneratingPayload} className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50 disabled:cursor-not-allowed">
+                            {isGeneratingPayload ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
+                            {isGeneratingPayload ? t('suggestingPayload') : t('suggestPayload')}
+                        </button>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('payloadPreviewTitle')}</label>
+                        <textarea
+                            value={rawPayloadText}
+                            onChange={handlePayloadTextChange}
+                            placeholder={t('payloadPreviewPlaceholder')}
+                            className={`w-full h-40 p-2 font-mono text-xs bg-gray-50 dark:bg-gray-700 border rounded-md resize-none transition-colors focus:outline-none focus:ring-2 ${
+                                isPayloadInvalid
+                                ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
+                                : 'border-gray-300 dark:border-gray-600 focus:border-primary-500 focus:ring-primary-500'
+                            }`}
+                        />
+                    </div>
+                </div>
+                {payloadError && (
+                  <div className="mt-4 text-center p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg">
+                    <p>{payloadError}</p>
+                  </div>
+                )}
+            </Card>
+          )}
+          
+          {parsedN8nData && (
+            <Card>
+                <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('endpointTestTitle')}</h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('endpointTestDescription')}</p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                        type="url"
+                        className="flex-grow p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition"
+                        value={endpointUrl}
+                        onChange={handleUrlChange}
+                        placeholder={t('endpointUrlPlaceholder')}
+                    />
+                    <button 
+                        type="button" 
+                        onClick={handleTestEndpoint} 
+                        disabled={testStatus === 'testing' || !endpointUrl || !samplePayload}
+                        className="px-4 py-2 bg-primary-600 text-white font-semibold rounded-lg shadow-sm hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                        {testStatus === 'testing' ? t('testingEndpoint') : t('testEndpointButton')}
+                    </button>
+                </div>
+                <div className="mt-3 min-h-[24px]">
+                    {renderTestStatus()}
+                </div>
+                <div className="mt-4 p-3 bg-yellow-50 dark:bg-yellow-900/40 border-l-4 border-yellow-400 dark:border-yellow-600 rounded-r-lg flex items-start gap-3">
+                    <ExclamationTriangleIcon className="w-5 h-5 text-yellow-600 dark:text-yellow-300 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-yellow-800 dark:text-yellow-200">{t('corsWarning')}</p>
+                </div>
+            </Card>
+          )}
+
+        </div>
+        <div className="lg:col-span-1">
+          <AuditHistory onViewReport={onViewHistory} />
+        </div>
+      </div>
     
-      <Card>
+      <Card className="mt-8">
         <form onSubmit={handleSubmit} className="space-y-8">
           <h2 className="text-2xl font-semibold text-gray-800 dark:text-white text-center">{t('configTitle')}</h2>
           

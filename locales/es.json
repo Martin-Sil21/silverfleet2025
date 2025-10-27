@@ -1,3 +1,4 @@
+
 {
   "appTitle": "Auditor de Agentes de IA",
   "appDescription": "Un entorno de trabajo profesional para depurar visualmente, probar y evaluar tus flujos de n8n con un análisis de ejecución real paso a paso.",
@@ -89,6 +90,18 @@
   "progress": "Progreso",
   "cancelAudit": "Cancelar Auditoría",
   "personaLabel": "Persona",
+  "personaGoal": "Objetivo",
+  "finalStatusLabel": "Estado Final",
   "userTurnTitle": "Usuario (Turno {turn})",
-  "agentResponseTitle": "Respuesta del Agente"
+  "agentResponseTitle": "Respuesta del Agente",
+  "auditHistoryTitle": "Historial de Auditorías",
+  "auditHistoryDescription": "Revisa los resultados de sesiones de auditoría anteriores.",
+  "noHistory": "No se encontraron auditorías pasadas. ¡Ejecuta tu primera auditoría para verla aquí!",
+  "viewReport": "Ver Reporte",
+  "delete": "Eliminar",
+  "confirmDelete": "¿Estás seguro de que quieres eliminar este reporte de auditoría? Esta acción no se puede deshacer.",
+  "liveAuditTitle": "Fuente de Auditoría en Vivo",
+  "liveAuditDescription": "Monitoreando conversaciones en tiempo real con el agente de IA.",
+  "backToConfig": "Volver a Configuración",
+  "corsWarning": "Tu endpoint debe estar configurado para permitir peticiones de origen cruzado (CORS) desde esta aplicación. Si la prueba falla con un error de red, revisa las cabeceras de respuesta de tu webhook de n8n."
 }
