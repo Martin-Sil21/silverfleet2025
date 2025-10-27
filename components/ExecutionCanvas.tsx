@@ -99,6 +99,8 @@ const NodeDetailsSidebar: React.FC<{ step: ExecutionStep; node: ParsedN8nNode; o
     )
 }
 
+
+
 const ExecutionCanvas: React.FC<{
   n8nWorkflow: ParsedN8nWorkflow;
   currentTrace: AuditResult | null;

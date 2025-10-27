@@ -103,4 +103,5 @@ export interface ParsedN8nWorkflow {
   nodes: ParsedN8nNode[];
   connections: N8nConnection[];
   detectedEndpoints?: string[];
+  detectedSamplePayload?: Record<string, any>;
 }
