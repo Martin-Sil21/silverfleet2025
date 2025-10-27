@@ -103,6 +103,7 @@ export const generateTestCases = async (config: AuditConfig, language: string): 
     - The \`conversationId\` in each \`initialPayload\` must be unique.
     - The data across the different test cases must be distinct to simulate different users.
     - The personas and goals must be directly related to the functions of the workflow you analyzed.
+    - The generated personas and payloads must be consistent with the theme and purpose implied by the sample payload. If the sample is about sales, create sales-related scenarios. If it's about support, create support-related scenarios.
     - Ensure the number of generated personas matches exactly ${testCaseCount}.
 
     Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
@@ -231,9 +232,15 @@ const generateUserMessageText = async (
     language: string
 ): Promise<string> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+    const findMessageText = (data: any): string => {
+        if (typeof data !== 'object' || data === null) return JSON.stringify(data);
+        const messageKey = Object.keys(data).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query'));
+        return messageKey && typeof data[messageKey] === 'string' ? data[messageKey] : JSON.stringify(data);
+    };
     
     const historyString = conversationHistory.map(turn => 
-        `User: ${JSON.stringify(turn.input)}\nAgent: ${JSON.stringify(turn.output)}`
+        `User: ${findMessageText(turn.input)}\nAgent: ${JSON.stringify(turn.output)}`
     ).join('\n\n');
 
     const prompt = `
