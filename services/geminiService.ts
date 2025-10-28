@@ -7,7 +7,7 @@ type ProgressCallback = (update: { message: string; trace?: AuditResult, testCas
 type ResultCallback = (result: AuditResult) => void;
 type CompletionCallback = () => void;
 
-const MAX_CONVERSATION_TURNS = 6;
+const MAX_CONVERSATION_TURNS = 12;
 
 const getLanguageInstruction = (language: string): string => {
     const langName = language === 'es' ? 'Spanish' : 'English';
@@ -228,7 +228,23 @@ const executeWorkflowVisually = async (
 
 const findUserMessageText = (data: any): string => {
     if (typeof data !== 'object' || data === null) return String(data);
-    const messageKey = Object.keys(data).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query'));
+    
+    // Look for common message fields in priority order
+    const commonFields = ['input', 'message', 'text', 'query', 'prompt', 'content', 'body', 'msg'];
+    for (const field of commonFields) {
+        if (data[field] && typeof data[field] === 'string') {
+            return data[field];
+        }
+    }
+    
+    // Fallback: find any string field (excluding IDs and metadata)
+    const excludeFields = ['id', 'conversationid', 'sessionid', 'userid', 'timestamp', 'date', 'nombre', 'name', 'telefono', 'phone', 'email'];
+    const messageKey = Object.keys(data).find(k => {
+        const lowerKey = k.toLowerCase();
+        return typeof data[k] === 'string' && 
+               !excludeFields.some(exclude => lowerKey.includes(exclude));
+    });
+    
     return messageKey && typeof data[messageKey] === 'string' ? data[messageKey] : JSON.stringify(data);
 };
 
@@ -257,26 +273,64 @@ const generateUserMessageText = async (
 ): Promise<string> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
-    const historyString = conversationHistory.map(turn => 
-        `User: ${findUserMessageText(turn.input)}\nAgent: ${findAgentMessageText(turn.output)}`
+    console.log(`[${testCase.title}] ========== GENERANDO NUEVO MENSAJE ==========`);
+    console.log(`[${testCase.title}] Historial tiene ${conversationHistory.length} turnos`);
+    console.log(`[${testCase.title}] Historial completo:`, JSON.stringify(conversationHistory, null, 2));
+    
+    const historyString = conversationHistory.map((turn, idx) => 
+        `[Turn ${idx + 1}]\nUser: ${findUserMessageText(turn.input)}\nAgent: ${findAgentMessageText(turn.output)}`
     ).join('\n\n');
 
+    const previousUserMessages = conversationHistory.map(turn => findUserMessageText(turn.input));
+    const lastAgentResponse = conversationHistory.length > 0 
+        ? findAgentMessageText(conversationHistory[conversationHistory.length - 1].output)
+        : null;
+    
+    if (previousUserMessages.length > 0) {
+        console.log(`[${testCase.title}] MENSAJES QUE YA ENVIÉ (NO DEBO REPETIR):`);
+        previousUserMessages.forEach((msg, idx) => {
+            console.log(`   ${idx + 1}. "${msg}"`);
+        });
+        console.log(`[${testCase.title}] ÚLTIMA RESPUESTA DEL AGENTE: "${lastAgentResponse}"`);
+    } else {
+        console.log(`[${testCase.title}] Es el PRIMER mensaje (sin historial)`);
+    }
+
     const prompt = `
-    You are role-playing as a user in a test scenario.
+    You are role-playing as a REAL human user chatting naturally. This is NOT a formal interaction.
     
     Your Persona: "${testCase.persona}"
     Your Ultimate Goal: "${testCase.conversationGoal}"
     
-    Conversation History So Far:
-    ${historyString || "(This is the first message of the conversation.)"}
+    ${historyString ? `Full Conversation History:\n${historyString}` : "(This is the first message of the conversation.)"}
     
-    Your Task: Based on your persona, goal, and the conversation history, generate the text for your *next* message.
+    ${lastAgentResponse ? `\nThe agent just said: "${lastAgentResponse}"\nYou MUST respond directly to what the agent just said.` : ''}
     
-    Instructions:
-    - If this is the first message, start the conversation naturally to work towards your goal.
-    - If there is history, respond to the agent's last message, keeping your persona and goal in mind.
-    - Be realistic. You can be friendly, confused, or frustrated, according to your persona.
-    - Your response should be just the message text, nothing else. No JSON, no labels.
+    Your Task: Generate your *next* message that:
+    1. RESPONDS SPECIFICALLY to the agent's last message (don't repeat yourself)
+    2. Moves the conversation forward toward your goal
+    3. Is DIFFERENT from anything you've said before
+    
+    Previous messages you already sent (DO NOT REPEAT):
+    ${previousUserMessages.map((msg, i) => `${i + 1}. ${msg}`).join('\n')}
+    
+    CRITICAL Instructions for Natural Conversation:
+    - Write SHORT messages (1-3 sentences MAX). Real people don't write essays in chat.
+    - Be CASUAL and NATURAL like a real person texting or using WhatsApp/chat.
+    - Use everyday language, contractions, and informal expressions.
+    - Focus on ONE thing at a time, not everything at once.
+    - REACT to what the agent just told you - acknowledge it, ask follow-up, or respond naturally.
+    - Don't try to accomplish your entire goal in one message - pace yourself naturally.
+    - Show realistic human behavior: ask one question, make a comment, react naturally.
+    - Use your persona's personality and emotions authentically.
+    - NEVER repeat what you've already said. Generate UNIQUE messages each time.
+    - Your response should be ONLY the message text, nothing else. No JSON, no labels, no quotes.
+    
+    Examples of good short messages:
+    - "Ah perfecto, gracias! Y cuánto sería el precio entonces?"
+    - "Ok, entiendo. Pero me sirve para 18m²?"
+    - "Genial! Y cómo hago para comprar?"
+    - "Dale, eso me re sirve. Y de cuánto es el plazo de entrega?"
     
     ${getLanguageInstruction(language)}
     `;
@@ -284,9 +338,21 @@ const generateUserMessageText = async (
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
+        config: {
+            temperature: 0.9, // Higher temperature for more variety
+        }
     });
     
-    return response.text.trim();
+    const generatedMessage = response.text.trim();
+    console.log(`[${testCase.title}] ✅ Mensaje generado: "${generatedMessage}"`);
+    
+    // Check if it's repeating a previous message
+    if (previousUserMessages.includes(generatedMessage)) {
+        console.error(`[${testCase.title}] ⚠️ ERROR: El mensaje generado es EXACTAMENTE IGUAL a uno anterior!`);
+        console.error(`[${testCase.title}] Esto NO debería pasar. El prompt incluye la lista de mensajes a NO repetir.`);
+    }
+    
+    return generatedMessage;
 };
 
 const checkIfGoalIsMet = async (
@@ -435,6 +501,8 @@ export const runFullAudit = async (
             throw new Error("Endpoint URL is not configured for real audit.");
         }
 
+        onProgress({ message: `🚀 Inicializando ${testCases.length} conversaciones simultáneas...` });
+        
         let conversations: ConversationState[] = testCases.map(tc => ({
             testCase: tc,
             history: [],
@@ -442,30 +510,103 @@ export const runFullAudit = async (
             finalStatus: 'PENDING',
         }));
 
+        // Log cada personalidad creada
+        testCases.forEach((tc, idx) => {
+            onProgress({ message: `👤 Personalidad ${idx + 1}/${testCases.length}: "${tc.title}" - ${tc.persona}` });
+        });
+        
+        onProgress({ message: `✅ Todas las personalidades cargadas. Iniciando conversaciones...` });
+
         for (let turnCount = 1; turnCount <= MAX_CONVERSATION_TURNS; turnCount++) {
             const activeConversations = conversations.filter(c => !c.isComplete);
             if (activeConversations.length === 0) {
-                onProgress({ message: "All conversations have been completed." });
+                onProgress({ message: "🎉 Todas las conversaciones han sido completadas." });
                 break;
             }
 
-            onProgress({ message: `Round ${turnCount} | Generating messages for ${activeConversations.length} conversations...` });
+            console.log(`\n\n${'='.repeat(80)}`);
+            console.log(`INICIO TURNO ${turnCount} - ${activeConversations.length} conversaciones activas`);
+            console.log(`${'='.repeat(80)}`);
+            
+            onProgress({ message: `\n━━━ Ronda ${turnCount}/${MAX_CONVERSATION_TURNS} ━━━` });
+            onProgress({ message: `💬 Generando mensajes para ${activeConversations.length} conversaciones activas...` });
 
             // 1. Generate all messages for this round
-            const messageGenerationPromises = activeConversations.map(conv => {
+            console.log(`\n========== RONDA ${turnCount} - GENERACIÓN DE MENSAJES ==========`);
+            const messageGenerationPromises = activeConversations.map((conv, idx) => {
+                console.log(`Conversación ${idx + 1}/${activeConversations.length}: "${conv.testCase.title}"`);
+                console.log(`  - Historial actual: ${conv.history.length} turnos`);
+                onProgress({ message: `  ✍️  Generando mensaje para "${conv.testCase.title}" (historial: ${conv.history.length} turnos)...` });
                 return generateUserMessageText(conv.testCase, conv.history, language);
             });
             const userMessageTexts = await Promise.all(messageGenerationPromises);
-            onProgress({ message: `Round ${turnCount} | All user messages generated. Sending to endpoint...` });
+            onProgress({ message: `✅ ${userMessageTexts.length} mensajes generados. Enviando al endpoint...` });
 
             // 2. Prepare and send all requests for this round
             const fetchPromises = activeConversations.map((conv, index) => {
                 const turnStartTime = Date.now();
                 const messageText = userMessageTexts[index];
                 
+                onProgress({ message: `  📤 Enviando: "${conv.testCase.title}" → "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"` });
+                
                 const basePayload = { ...conv.testCase.initialPayload, conversationId: conv.testCase.id };
-                const messageKey = Object.keys(basePayload).find(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('text') || k.toLowerCase().includes('query')) || 'message';
-                const userInput = { ...basePayload, [messageKey]: messageText };
+                
+                // Smart detection: Find which field contains a string value (likely the message)
+                // Prioritize common message field names, but also detect any string field
+                let messageField = null;
+                
+                // First pass: Look for common message field names
+                const commonFields = ['input', 'message', 'text', 'query', 'prompt', 'content', 'body', 'msg'];
+                for (const field of commonFields) {
+                    const foundKey = Object.keys(basePayload).find(k => k.toLowerCase() === field || k.toLowerCase().includes(field));
+                    if (foundKey && typeof basePayload[foundKey] === 'string') {
+                        messageField = foundKey;
+                        break;
+                    }
+                }
+                
+                // Second pass: If not found, use any string field (excluding IDs and metadata)
+                if (!messageField) {
+                    const excludeFields = ['id', 'conversationid', 'sessionid', 'userid', 'timestamp', 'date'];
+                    messageField = Object.keys(basePayload).find(k => {
+                        const lowerKey = k.toLowerCase();
+                        return typeof basePayload[k] === 'string' && 
+                               !excludeFields.some(exclude => lowerKey.includes(exclude));
+                    });
+                }
+                
+                // Fallback: use 'input' as default
+                if (!messageField) {
+                    messageField = 'input';
+                    console.warn(`[${conv.testCase.title}] ⚠️ No se encontró campo de mensaje. Usando 'input' por defecto.`);
+                }
+                
+                // UPDATE that field with the new message
+                const userInput = { 
+                    ...basePayload,
+                    [messageField]: messageText
+                };
+                
+                console.log(`[${conv.testCase.title}] 📤 Turno ${turnCount}`);
+                console.log(`[${conv.testCase.title}] 📤 Campo detectado: "${messageField}"`);
+                console.log(`[${conv.testCase.title}] 📤 Nuevo valor: "${messageText}"`);
+                console.log(`[${conv.testCase.title}] 📤 Payload completo:`, JSON.stringify(userInput, null, 2));
+                
+                // Immediately show the user message in UI (before getting response)
+                const pendingStep: ExecutionStep = {
+                    nodeId: `Turn ${turnCount}`,
+                    status: 'RUNNING',
+                    input: userInput,
+                    output: null,
+                    log: 'Esperando respuesta...',
+                    durationMs: 0,
+                    timestamp: Date.now(),
+                };
+                onProgress({ 
+                    message: `  📨 Mensaje enviado: "${conv.testCase.title}"`,
+                    testCaseId: conv.testCase.id,
+                    step: pendingStep
+                });
                 
                 return fetch(config.endpointUrl!, {
                     method: 'POST',
@@ -478,28 +619,58 @@ export const runFullAudit = async (
                         throw new Error(`Endpoint returned status ${response.status}: ${response.statusText}`);
                     }
                     const responseData = await response.json();
-                    return { status: 'SUCCESS' as const, output: responseData, input: userInput, log: `Success on Round ${turnCount}.`, durationMs };
+                    onProgress({ message: `  ✅ "${conv.testCase.title}" respondió en ${durationMs}ms` });
+                    return { 
+                        status: 'SUCCESS' as const, 
+                        output: responseData, 
+                        input: userInput, 
+                        log: `Success on Round ${turnCount}.`, 
+                        durationMs,
+                        conversationIndex: index  // Add index to match with conversation
+                    };
                 })
                 .catch(error => {
                     const durationMs = Date.now() - turnStartTime;
                     const logMessage = error instanceof Error ? error.message : "An unknown network error occurred.";
-                    return { status: 'ERROR' as const, output: null, input: userInput, log: logMessage, durationMs };
+                    onProgress({ message: `  ❌ Error en "${conv.testCase.title}": ${logMessage}` });
+                    return { 
+                        status: 'ERROR' as const, 
+                        output: null, 
+                        input: userInput, 
+                        log: logMessage, 
+                        durationMs,
+                        conversationIndex: index  // Add index to match with conversation
+                    };
                 });
             });
             
-            onProgress({ message: `Round ${turnCount} | All messages sent. Awaiting agent responses...` });
+            onProgress({ message: `⏳ Esperando respuestas del agente...` });
 
             const turnResults = await Promise.all(fetchPromises);
-            onProgress({ message: `Round ${turnCount} | All responses received. Processing results...` });
+            onProgress({ message: `📥 Todas las respuestas recibidas. Procesando resultados...` });
 
             // 3. Update conversation states with the results and notify UI
             activeConversations.forEach((conv, index) => {
+                const result = turnResults[index];
                 const step: ExecutionStep = {
                     nodeId: `Turn ${turnCount}`,
-                    ...turnResults[index],
+                    status: result.status,
+                    input: result.input,
+                    output: result.output,
+                    log: result.log,
+                    durationMs: result.durationMs,
                     timestamp: Date.now(),
                 };
+                
+                // CRITICAL: Add to conversation history BEFORE generating next message
                 conv.history.push(step);
+                
+                console.log(`\n[${conv.testCase.title}] ✅ Historia ACTUALIZADA después del turno ${turnCount}`);
+                console.log(`[${conv.testCase.title}] Nuevo tamaño del historial: ${conv.history.length} turnos`);
+                console.log(`[${conv.testCase.title}] Último mensaje del usuario: "${findUserMessageText(step.input)}"`);
+                console.log(`[${conv.testCase.title}] Última respuesta del agente: "${findAgentMessageText(step.output).substring(0, 100)}..."`);
+                console.log(`[${conv.testCase.title}] Todos los mensajes del usuario hasta ahora:`, conv.history.map(h => findUserMessageText(h.input)));
+                
                 onProgress({ 
                     message: `Processed Turn ${turnCount} for "${conv.testCase.title}". Status: ${step.status}`,
                     testCaseId: conv.testCase.id,
@@ -509,14 +680,14 @@ export const runFullAudit = async (
                 if (step.status === 'ERROR') {
                     conv.isComplete = true;
                     conv.finalStatus = 'ERROR';
-                    onProgress({ message: `Conversation "${conv.testCase.title}" failed with an error.` });
+                    onProgress({ message: `⛔ Conversación "${conv.testCase.title}" terminó con error.` });
                 }
             });
 
             // 4. Check for goal completion on successful turns
             const successfulConversations = activeConversations.filter((c, i) => turnResults[i].status === 'SUCCESS' && !c.isComplete);
             if (successfulConversations.length > 0) {
-                 onProgress({ message: `Checking for goal completion for ${successfulConversations.length} conversation(s)...`});
+                 onProgress({ message: `🎯 Verificando cumplimiento de objetivos para ${successfulConversations.length} conversación(es)...`});
                  const goalCheckPromises = successfulConversations.map(conv =>
                     checkIfGoalIsMet(conv.testCase, conv.history, language)
                         .then(isMet => ({ testCaseId: conv.testCase.id, isMet }))
@@ -529,17 +700,18 @@ export const runFullAudit = async (
                         if (conversation && !conversation.isComplete) {
                             conversation.isComplete = true;
                             conversation.finalStatus = 'SUCCESS';
-                            onProgress({ message: `Goal met for "${conversation.testCase.title}". Conversation finished.` });
+                            onProgress({ message: `🎉 Objetivo cumplido: "${conversation.testCase.title}" - Conversación finalizada.` });
                         }
                     }
                 });
             }
         } // End of main loop
 
-        onProgress({ message: "All conversation rounds complete. Analyzing final results..." });
+        onProgress({ message: "\n━━━━━━━━━━━━━━━━━━━━━━" });
+        onProgress({ message: "📊 Todas las rondas completadas. Analizando resultados finales..." });
 
         const analysisPromises = conversations.map(async conv => {
-            onProgress({ message: `Analyzing final result for "${conv.testCase.title}"...` });
+            onProgress({ message: `🔍 Analizando resultado final: "${conv.testCase.title}"...` });
             const finalStatus = conv.finalStatus === 'PENDING' ? 'SUCCESS' : conv.finalStatus;
             const analysis = await analyzeResult(config, { id: conv.testCase.id, testCase: conv.testCase, executionTrace: conv.history, finalStatus }, language);
             const result: AuditResult = {
@@ -550,10 +722,11 @@ export const runFullAudit = async (
                 analysis
             };
             onResultComplete(result);
-            onProgress({ message: `Analysis complete for "${conv.testCase.title}".` });
+            onProgress({ message: `✅ Análisis completo para "${conv.testCase.title}" - Score: ${analysis.overallScore.toFixed(1)}/10` });
         });
 
         await Promise.all(analysisPromises);
+        onProgress({ message: "\n🏁 AUDITORÍA COMPLETA - Todos los resultados procesados." });
         onAllComplete();
 
     } else {

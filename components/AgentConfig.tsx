@@ -52,7 +52,6 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
   
   const [auditType, setAuditType] = useState<'visual' | 'real'>('visual');
 
-
   const fetchAndSetCriteria = async (workflowForSuggestion: WorkflowNode[], connectionsForSuggestion: N8nConnection[]) => {
     setIsSuggestingCriteria(true);
     try {
@@ -222,7 +221,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
         const response = await fetch(endpointUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(samplePayload || { message: "Silver Fleet audit connectivity test" })
+            body: JSON.stringify({})
         });
         if (!response.ok) {
             throw new Error(`Endpoint returned status ${response.status}: ${response.statusText}`);
@@ -359,7 +358,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
                     <button 
                         type="button" 
                         onClick={handleTestEndpoint} 
-                        disabled={testStatus === 'testing' || !endpointUrl || !samplePayload}
+                        disabled={testStatus === 'testing' || !endpointUrl}
                         className="px-4 py-2 bg-primary-600 text-white font-semibold rounded-lg shadow-sm hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
                     >
                         {testStatus === 'testing' ? t('testingEndpoint') : t('testEndpointButton')}

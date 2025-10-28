@@ -49,7 +49,22 @@ const App: React.FC = () => {
         const newData = [...prevData];
         const caseIndex = newData.findIndex(item => item.id === update.testCaseId);
         if (caseIndex !== -1) {
-            const newTrace = [...newData[caseIndex].executionTrace, update.step];
+            const existingTrace = newData[caseIndex].executionTrace;
+            // Check if we need to replace a pending step (RUNNING status with same nodeId)
+            const pendingIndex = existingTrace.findIndex(
+              step => step.nodeId === update.step!.nodeId && step.status === 'RUNNING'
+            );
+            
+            let newTrace;
+            if (pendingIndex !== -1 && update.step.status !== 'RUNNING') {
+              // Replace the pending step with the completed one
+              newTrace = [...existingTrace];
+              newTrace[pendingIndex] = update.step;
+            } else {
+              // Add new step
+              newTrace = [...existingTrace, update.step];
+            }
+            
             newData[caseIndex] = { ...newData[caseIndex], executionTrace: newTrace };
         }
         return newData;
@@ -76,8 +91,15 @@ const App: React.FC = () => {
     setLiveLogs([]);
 
     try {
-      handleProgressUpdate({ message: `Generating ${data.config.testCaseCount} test case personas...` });
+      handleProgressUpdate({ message: `🎭 Generando ${data.config.testCaseCount} personalidades de prueba...` });
       const testCases = await generateTestCases(data.config, language);
+      
+      handleProgressUpdate({ message: `✅ ${testCases.length} personalidades creadas exitosamente` });
+      testCases.forEach((tc, idx) => {
+        const personaText = typeof tc.persona === 'string' ? tc.persona : JSON.stringify(tc.persona);
+        const shortPersona = personaText.length > 60 ? personaText.substring(0, 60) + '...' : personaText;
+        handleProgressUpdate({ message: `  👤 ${idx + 1}. "${tc.title}" - ${shortPersona}` });
+      });
 
       if (data.config.auditType === 'real') {
          const initialLiveResults: AuditResult[] = testCases.map(tc => ({
