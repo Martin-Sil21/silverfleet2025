@@ -93,14 +93,57 @@ export const parseN8nWorkflow = (jsonContent: string): ParsedN8nWorkflow => {
     }
 
     const detectedEndpoints: string[] = [];
-    workflow.nodes.forEach(node => {
-        if (node.type === 'n8n-nodes-base.httpRequest') {
-            const url = node.parameters?.url;
-            if (typeof url === 'string' && url.trim().startsWith('http') && !url.includes('{{')) {
-                detectedEndpoints.push(url.trim());
+    
+    // 🔥 ESTRATEGIA 1: Buscar el nodo WEBHOOK en CUALQUIER posición
+    const webhookTypes = ['n8n-nodes-base.webhook', 'webhook'];
+    let webhookFound = false;
+    
+    for (const node of workflow.nodes) {
+        if (webhookTypes.some(type => node.type.toLowerCase().includes(type))) {
+            console.log(`🎯 Nodo Webhook detectado: ${node.name} (posición ${workflow.nodes.indexOf(node) + 1})`);
+            webhookFound = true;
+            
+            // La URL del webhook puede estar en diferentes lugares
+            const webhookUrl = node.parameters?.path || 
+                              node.parameters?.webhookUrl ||
+                              node.parameters?.url;
+            
+            if (typeof webhookUrl === 'string' && webhookUrl.trim()) {
+                // Si la URL es relativa (ej: "590785a9-e814-4a42-959a-7e8e4ff5ab9e"), 
+                // necesitamos el dominio base
+                let fullUrl = webhookUrl.trim();
+                
+                // Si no empieza con http, es un path relativo
+                if (!fullUrl.startsWith('http')) {
+                    // Buscar el dominio en webhookId o en la configuración
+                    const domain = node.parameters?.httpMethod === 'POST' ? 
+                                  'https://silverfleet.com.ar/webhook/' : 
+                                  'http://localhost:5678/webhook/';
+                    fullUrl = `${domain}${fullUrl}`;
+                }
+                
+                console.log(`   ✅ URL del webhook: ${fullUrl}`);
+                detectedEndpoints.push(fullUrl);
+                break; // Solo necesitamos el primer webhook
+            } else {
+                console.log(`   ⚠️ No se encontró URL en el webhook`);
             }
         }
-    });
+    }
+    
+    // 🔥 ESTRATEGIA 2 (FALLBACK): Si no hay webhook, buscar httpRequest (solo si NO encontramos webhook)
+    if (detectedEndpoints.length === 0) {
+        console.log(`   🔍 No se encontró webhook, buscando httpRequest...`);
+        workflow.nodes.forEach(node => {
+            if (node.type === 'n8n-nodes-base.httpRequest') {
+                const url = node.parameters?.url;
+                if (typeof url === 'string' && url.trim().startsWith('http') && !url.includes('{{')) {
+                    console.log(`   ℹ️ URL de httpRequest encontrada: ${url.trim()}`);
+                    detectedEndpoints.push(url.trim());
+                }
+            }
+        });
+    }
 
     const allNodes: ParsedN8nNode[] = workflow.nodes.map((node) => {
       const systemPrompt = getSystemPromptFromNode(node.parameters);
@@ -133,7 +176,12 @@ export const parseN8nWorkflow = (jsonContent: string): ParsedN8nWorkflow => {
     
     const connections = transformConnections(workflow.connections, workflow.nodes);
     
-    return { nodes: allNodes, connections, detectedEndpoints: [...new Set(detectedEndpoints)] };
+    return { 
+      nodes: allNodes, 
+      connections, 
+      detectedEndpoints: [...new Set(detectedEndpoints)],
+      rawNodes: workflow.nodes // 🔥 NUEVO: Guardar nodos originales para análisis de payload
+    };
 
   } catch (error) {
     if (error instanceof SyntaxError) {

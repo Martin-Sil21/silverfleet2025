@@ -1,9 +1,15 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import type { AuditConfig, TestCase, Analysis, AuditResult, ImprovementData, WorkflowNode, N8nConnection, AgentNode, ToolNode, ExecutionStep } from '../types';
+import { runConversationIndependently } from './independentConversationRunner';
+import { costTracker, type CostSummary } from './costTracker';
+import { initializeRealDatabaseAuditor, getRealDatabaseAuditor, cleanupRealDatabaseAuditor } from './realDatabaseAuditor';
+
+// Exportar función para obtener el resumen de costos desde otros componentes
+export const getCostSummary = (): CostSummary => costTracker.getSummary();
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-type ProgressCallback = (update: { message: string; trace?: AuditResult, testCaseId?: string, step?: ExecutionStep }) => void;
+export type ProgressCallback = (update: { message: string; trace?: AuditResult, testCaseId?: string, step?: ExecutionStep }) => void;
 type ResultCallback = (result: AuditResult) => void;
 type CompletionCallback = () => void;
 
@@ -65,6 +71,17 @@ export const generateSamplePayload = async (workflow: WorkflowNode[], connection
         },
     });
 
+    // 💰 Track usage
+    if (response.usageMetadata) {
+        costTracker.recordUsage({
+            promptTokens: response.usageMetadata.promptTokenCount || 0,
+            responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+            totalTokens: response.usageMetadata.totalTokenCount || 0,
+            model: 'gemini-2.5-pro',
+            operation: 'generate_sample_payload'
+        });
+    }
+
     try {
         const jsonText = response.text.trim();
         const parsed = JSON.parse(jsonText);
@@ -80,51 +97,107 @@ export const generateSamplePayload = async (workflow: WorkflowNode[], connection
     }
 }
 
-export const generateTestCases = async (config: AuditConfig, language: string): Promise<TestCase[]> => {
+export const generateTestCases = async (
+    config: AuditConfig, 
+    language: string,
+    onBatchGenerated?: (batch: TestCase[]) => void // 🔥 NUEVO: Callback para cada lote
+): Promise<TestCase[]> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const { workflow, criteria, testCaseCount, connections, samplePayload } = config;
 
-    const prompt = `
-    Act as a senior QA engineer creating data for testing a conversational AI workflow. Your task is to generate ${testCaseCount} unique, realistic user profiles ("bot buyers").
+    // 🔥 NUEVO: Generar lotes EN PARALELO para máxima velocidad
+    const BATCH_SIZE = 20;
+    const CONCURRENT_BATCHES = 5; // 🚀 Generar 5 lotes a la vez (100 agentes en 1 minuto!)
+    const batches = Math.ceil(testCaseCount / BATCH_SIZE);
+    const allTestCases: TestCase[] = [];
     
-    This is the workflow you are testing:
-    ${formatWorkflowForPrompt(workflow, connections)}
-
-    This is the sample JSON structure the workflow expects for each message:
-    ${JSON.stringify(samplePayload, null, 2)}
-
-    Based on your analysis of the workflow and the sample payload, for each of the ${testCaseCount} test cases, you must:
-    1.  Create a complete JSON payload (\`initialPayload\`) that is **relevant to the workflow's purpose** and follows the sample structure but with **completely new and unique data**. For example, if the workflow is for customer support, create different customer issues.
-    2.  Define a user 'persona' that describes the user's personality and communication style (e.g., "Impatient customer, uses short, direct sentences"). This persona should be consistent with the payload data.
-    3.  Define a clear 'conversationGoal' for the persona that is achievable through the provided workflow (e.g., "Find out why their delivery is late and get a new ETA").
-    4.  Provide a unique 'id' and a concise 'title' for the test case that summarizes the persona's goal.
-
-    Instructions:
-    - The \`conversationId\` in each \`initialPayload\` must be unique.
-    - The data across the different test cases must be distinct to simulate different users.
-    - The personas and goals must be directly related to the functions of the workflow you analyzed.
-    - The generated personas and payloads must be consistent with the theme and purpose implied by the sample payload. If the sample is about sales, create sales-related scenarios. If it's about support, create support-related scenarios.
-    - Ensure the number of generated personas matches exactly ${testCaseCount}.
-
-    Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
-    ${getLanguageInstruction(language)}
-    `;
-
-    const response = await ai.models.generateContent({
-        model: 'gemini-2.5-pro',
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-        },
-    });
+    console.log(`🎭 Generando ${testCaseCount} test cases en ${batches} lotes (${CONCURRENT_BATCHES} paralelos)...`);
     
-    try {
-        const jsonText = response.text.trim();
-        return JSON.parse(jsonText);
-    } catch (e) {
-        console.error("Failed to parse test cases JSON:", response.text);
-        throw new Error("Could not generate valid test cases. The model returned malformed JSON.");
+    // Función para generar un lote
+    const generateBatch = async (batchIndex: number) => {
+        const startIndex = batchIndex * BATCH_SIZE + 1;
+        const remaining = testCaseCount - (batchIndex * BATCH_SIZE);
+        const batchSize = Math.min(BATCH_SIZE, remaining);
+        
+        console.log(`   📦 Lote ${batchIndex + 1}/${batches}: Iniciando generación de ${batchSize} test cases (${startIndex}-${startIndex + batchSize - 1})...`);
+
+        const prompt = `
+        Act as a senior QA engineer creating data for testing a conversational AI workflow. Your task is to generate ${batchSize} unique, realistic user profiles ("bot buyers").
+        
+        This is the workflow you are testing:
+        ${formatWorkflowForPrompt(workflow, connections)}
+
+        This is the sample JSON structure the workflow expects for each message:
+        ${JSON.stringify(samplePayload, null, 2)}
+
+        Based on your analysis of the workflow and the sample payload, for each of the ${batchSize} test cases, you must:
+        1.  Create a complete JSON payload (\`initialPayload\`) that is **relevant to the workflow's purpose** and follows the sample structure but with **completely new and unique data**. For example, if the workflow is for customer support, create different customer issues.
+        2.  Define a user 'persona' that describes the user's personality and communication style (e.g., "Impatient customer, uses short, direct sentences"). This persona should be consistent with the payload data.
+        3.  Define a clear 'conversationGoal' for the persona that is achievable through the provided workflow (e.g., "Find out why their delivery is late and get a new ETA").
+        4.  Provide a unique 'id' (starting from TC-${startIndex.toString().padStart(3, '0')}) and a concise 'title' for the test case that summarizes the persona's goal.
+
+        Instructions:
+        - The \`conversationId\` in each \`initialPayload\` must be unique (use TC-${startIndex.toString().padStart(3, '0')}, TC-${(startIndex+1).toString().padStart(3, '0')}, etc.).
+        - The data across the different test cases must be distinct to simulate different users.
+        - The personas and goals must be directly related to the functions of the workflow you analyzed.
+        - The generated personas and payloads must be consistent with the theme and purpose implied by the sample payload. If the sample is about sales, create sales-related scenarios. If it's about support, create support-related scenarios.
+        - Ensure the number of generated personas matches exactly ${batchSize}.
+        - Make each persona DIFFERENT from the previous batches (vary age, location, needs, personality, etc.).
+
+        Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
+        ${getLanguageInstruction(language)}
+        `;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-pro',
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                maxOutputTokens: 8192,
+            },
+        });
+        
+        // 💰 Track usage
+        if (response.usageMetadata) {
+            costTracker.recordUsage({
+                promptTokens: response.usageMetadata.promptTokenCount || 0,
+                responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+                totalTokens: response.usageMetadata.totalTokenCount || 0,
+                model: 'gemini-2.5-pro',
+                operation: 'generate_test_cases'
+            });
+        }
+        
+        try {
+            const jsonText = response.text.trim();
+            const batchTestCases = JSON.parse(jsonText);
+            console.log(`   ✅ Lote ${batchIndex + 1}/${batches}: ${batchTestCases.length} test cases generados`);
+            
+            // 🔥 NUEVO: Notificar inmediatamente al UI
+            if (onBatchGenerated) {
+                onBatchGenerated(batchTestCases);
+            }
+            
+            return batchTestCases;
+        } catch (e) {
+            console.error(`   ❌ Error en lote ${batchIndex + 1}:`, response.text);
+            throw new Error(`Could not generate valid test cases for batch ${batchIndex + 1}. The model returned malformed JSON.`);
+        }
+    };
+    
+    // 🚀 Generar lotes en paralelo (grupos de CONCURRENT_BATCHES)
+    for (let i = 0; i < batches; i += CONCURRENT_BATCHES) {
+        const batchPromises = [];
+        for (let j = 0; j < CONCURRENT_BATCHES && (i + j) < batches; j++) {
+            batchPromises.push(generateBatch(i + j));
+        }
+        
+        const results = await Promise.all(batchPromises);
+        allTestCases.push(...results.flat());
     }
+    
+    console.log(`✅ Total generado: ${allTestCases.length}/${testCaseCount} test cases`);
+    return allTestCases;
 };
 
 const executeWorkflowVisually = async (
@@ -194,6 +267,18 @@ const executeWorkflowVisually = async (
                 const agentNode = node as AgentNode;
                 const prompt = `System Prompt: ${agentNode.systemPrompt}\n\nInput Data:\n${JSON.stringify(inputData, null, 2)}\n\nTask: Process the input data based on your system prompt and generate a JSON output. Your output must be only the JSON object.`;
                 const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: "application/json" } });
+                
+                // 💰 Track usage
+                if (response.usageMetadata) {
+                    costTracker.recordUsage({
+                        promptTokens: response.usageMetadata.promptTokenCount || 0,
+                        responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+                        totalTokens: response.usageMetadata.totalTokenCount || 0,
+                        model: 'gemini-2.5-flash',
+                        operation: 'visual_agent_execution'
+                    });
+                }
+                
                 try {
                    output = JSON.parse(response.text);
                    updateTrace(nodeId, { log: `Node ${node.name} finished. Output generated.` });
@@ -226,7 +311,7 @@ const executeWorkflowVisually = async (
     return { executionTrace, finalStatus: 'SUCCESS' };
 };
 
-const findUserMessageText = (data: any): string => {
+export const findUserMessageText = (data: any): string => {
     if (typeof data !== 'object' || data === null) return String(data);
     
     // Look for common message fields in priority order
@@ -248,7 +333,7 @@ const findUserMessageText = (data: any): string => {
     return messageKey && typeof data[messageKey] === 'string' ? data[messageKey] : JSON.stringify(data);
 };
 
-const findAgentMessageText = (data: any): string => {
+export const findAgentMessageText = (data: any): string => {
     if (!data) return "(No response)";
     if (typeof data === 'string') return data;
     if (typeof data.response === 'string') return data.response;
@@ -266,7 +351,7 @@ const findAgentMessageText = (data: any): string => {
     return JSON.stringify(data); // final fallback
 }
 
-const generateUserMessageText = async (
+export const generateUserMessageText = async (
     testCase: TestCase,
     conversationHistory: ExecutionStep[],
     language: string
@@ -343,6 +428,18 @@ const generateUserMessageText = async (
         }
     });
     
+    // 💰 Track usage
+    if (response.usageMetadata) {
+        costTracker.recordUsage({
+            promptTokens: response.usageMetadata.promptTokenCount || 0,
+            responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+            totalTokens: response.usageMetadata.totalTokenCount || 0,
+            model: 'gemini-2.5-flash',
+            operation: 'generate_user_message',
+            conversationId: testCase.id
+        });
+    }
+    
     const generatedMessage = response.text.trim();
     console.log(`[${testCase.title}] ✅ Mensaje generado: "${generatedMessage}"`);
     
@@ -395,6 +492,17 @@ const checkIfGoalIsMet = async (
         }
     });
 
+    // 💰 Track usage
+    if (response.usageMetadata) {
+        costTracker.recordUsage({
+            promptTokens: response.usageMetadata.promptTokenCount || 0,
+            responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+            totalTokens: response.usageMetadata.totalTokenCount || 0,
+            model: 'gemini-2.5-flash',
+            operation: 'check_goal_achieved'
+        });
+    }
+
     try {
         const result = JSON.parse(response.text);
         return result.goalAchieved === true;
@@ -417,6 +525,15 @@ const analyzeResult = async (
         ? executionTrace.map(turn => `\n${turn.nodeId}:\n  User: ${findUserMessageText(turn.input)}\n  Agent: ${findAgentMessageText(turn.output)} ${turn.status === 'ERROR' ? `\n  Error: ${turn.log}` : ''}`).join('')
         : executionTrace.map(step => `Node: ${workflow.find(n => n.id === step.nodeId)?.name || step.nodeId} | Status: ${step.status}`).join('\n');
 
+    // 🔍 Contar turnos y estados
+    const totalTurns = executionTrace.length;
+    const successfulTurns = executionTrace.filter(t => t.status === 'SUCCESS').length;
+    const errorTurns = executionTrace.filter(t => t.status === 'ERROR').length;
+    const wasBlocked = executionTrace.some(t => 
+        t.output && typeof t.output === 'object' && 
+        (t.output.blocked === true || t.output.intentional_block === true || t.output.intentional_end === true)
+    );
+
     const prompt = `
     Act as an expert QA analyst. Your task is to analyze the execution of a test case against a given workflow and provide a detailed analysis.
 
@@ -427,18 +544,35 @@ const analyzeResult = async (
     - Title: ${testCase.title}
     - Persona: ${testCase.persona}
     - Goal: ${testCase.conversationGoal}
-
-    Execution Trace Summary:
-    ${traceSummary}
     
-    Final status of the execution was: ${finalStatus}.
+    Conversation Statistics:
+    - Total turns completed: ${totalTurns}
+    - Successful interactions: ${successfulTurns}
+    - Errors encountered: ${errorTurns}
+    - Final status: ${finalStatus}
+    ${wasBlocked ? '- ⚠️ User was blocked or conversation ended intentionally' : ''}
+
+    Execution Trace (Full Conversation):
+    ${traceSummary}
 
     Analysis Task:
-    1.  Provide a concise overall 'summary' of what happened during the test. For conversations, assess if the persona's goal was met.
-    2.  For each criterion listed below, provide a score from 1 (terrible) to 10 (perfect) and a brief 'justification' for your score.
+    1.  Provide a concise overall 'summary' of what happened during the test. 
+        - Assess if the persona's GOAL ("${testCase.conversationGoal}") was successfully met.
+        - Consider the conversation flow, agent responses, and whether the user got what they needed.
+        - If the user was blocked or the conversation ended early, evaluate if it was justified.
+    
+    2.  For each criterion listed below, provide a score from 1 (terrible) to 10 (perfect) and a detailed 'justification':
+        - Be STRICT but FAIR. Don't give high scores just because there were no errors.
+        - Consider: Did the agent help the user achieve their goal? Was it helpful, accurate, and natural?
+        - A conversation that completes without errors but doesn't help the user is NOT a 10/10.
+        - Blocking a legitimate user request should result in low scores.
+    
     3.  Calculate the 'overallScore' as the average of the individual criteria scores.
 
     Audit Criteria: ${criteria.join(', ')}
+    
+    IMPORTANT: Your scores should reflect whether the USER'S GOAL was achieved, not just technical success.
+    A technically perfect conversation that doesn't help the user is a failure.
     
     Your response must be a valid JSON object.
     ${getLanguageInstruction(language)}
@@ -472,6 +606,18 @@ const analyzeResult = async (
         },
     });
 
+    // 💰 Track usage
+    if (response.usageMetadata) {
+        costTracker.recordUsage({
+            promptTokens: response.usageMetadata.promptTokenCount || 0,
+            responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+            totalTokens: response.usageMetadata.totalTokenCount || 0,
+            model: 'gemini-2.5-pro',
+            operation: 'analyze_result',
+            conversationId: result.id
+        });
+    }
+
     try {
         const jsonText = response.text.trim();
         return JSON.parse(jsonText);
@@ -481,11 +627,13 @@ const analyzeResult = async (
     }
 };
 
-type ConversationState = {
+export type ConversationState = {
     testCase: TestCase;
     history: ExecutionStep[];
     isComplete: boolean;
     finalStatus: 'SUCCESS' | 'ERROR' | 'PENDING';
+    startTime?: number; // ⏱️ Timestamp de inicio
+    endTime?: number; // ⏱️ Timestamp de fin
 };
 
 export const runFullAudit = async (
@@ -501,13 +649,23 @@ export const runFullAudit = async (
             throw new Error("Endpoint URL is not configured for real audit.");
         }
 
+        // ⏱️ Iniciar tracking de tiempo total
+        const auditStartTime = Date.now();
+        onProgress({ message: `⏱️ Auditoría iniciada: ${new Date(auditStartTime).toLocaleString('es-AR')}` });
+        
+        // 💰 Iniciar tracking de costos
+        costTracker.startAudit('gemini-1.5-flash');
+        onProgress({ message: `💰 Tracking de costos activado` });
+
         onProgress({ message: `🚀 Inicializando ${testCases.length} conversaciones simultáneas...` });
         
+        const conversationStartTime = Date.now();
         let conversations: ConversationState[] = testCases.map(tc => ({
             testCase: tc,
             history: [],
             isComplete: false,
             finalStatus: 'PENDING',
+            startTime: conversationStartTime, // Todas empiezan al mismo tiempo (paralelas)
         }));
 
         // Log cada personalidad creada
@@ -515,198 +673,85 @@ export const runFullAudit = async (
             onProgress({ message: `👤 Personalidad ${idx + 1}/${testCases.length}: "${tc.title}" - ${tc.persona}` });
         });
         
-        onProgress({ message: `✅ Todas las personalidades cargadas. Iniciando conversaciones...` });
-
-        for (let turnCount = 1; turnCount <= MAX_CONVERSATION_TURNS; turnCount++) {
-            const activeConversations = conversations.filter(c => !c.isComplete);
-            if (activeConversations.length === 0) {
-                onProgress({ message: "🎉 Todas las conversaciones han sido completadas." });
-                break;
-            }
-
-            console.log(`\n\n${'='.repeat(80)}`);
-            console.log(`INICIO TURNO ${turnCount} - ${activeConversations.length} conversaciones activas`);
-            console.log(`${'='.repeat(80)}`);
+        // 🗄️ Inicializar auditores de BD si está configurado
+        console.log(`\n🔍 [Audit Start] Verificando configuración de BD...`);
+        console.log(`   realDatabaseConfig existe:`, !!config.realDatabaseConfig);
+        if (config.realDatabaseConfig) {
+            console.log(`   - URL:`, config.realDatabaseConfig.url);
+            console.log(`   - Key presente:`, !!config.realDatabaseConfig.key);
+            console.log(`   - Tablas:`, config.realDatabaseConfig.tables);
+        }
+        
+        if (config.realDatabaseConfig && config.realDatabaseConfig.url && config.realDatabaseConfig.key) {
+            onProgress({ message: `🗄️ Inicializando auditores de base de datos...` });
+            onProgress({ message: `   📋 Tipo: ${config.realDatabaseConfig.type}` });
+            onProgress({ message: `   📋 Tablas: ${config.realDatabaseConfig.tables.join(', ')}` });
             
-            onProgress({ message: `\n━━━ Ronda ${turnCount}/${MAX_CONVERSATION_TURNS} ━━━` });
-            onProgress({ message: `💬 Generando mensajes para ${activeConversations.length} conversaciones activas...` });
-
-            // 1. Generate all messages for this round
-            console.log(`\n========== RONDA ${turnCount} - GENERACIÓN DE MENSAJES ==========`);
-            const messageGenerationPromises = activeConversations.map((conv, idx) => {
-                console.log(`Conversación ${idx + 1}/${activeConversations.length}: "${conv.testCase.title}"`);
-                console.log(`  - Historial actual: ${conv.history.length} turnos`);
-                onProgress({ message: `  ✍️  Generando mensaje para "${conv.testCase.title}" (historial: ${conv.history.length} turnos)...` });
-                return generateUserMessageText(conv.testCase, conv.history, language);
-            });
-            const userMessageTexts = await Promise.all(messageGenerationPromises);
-            onProgress({ message: `✅ ${userMessageTexts.length} mensajes generados. Enviando al endpoint...` });
-
-            // 2. Prepare and send all requests for this round
-            const fetchPromises = activeConversations.map((conv, index) => {
-                const turnStartTime = Date.now();
-                const messageText = userMessageTexts[index];
-                
-                onProgress({ message: `  📤 Enviando: "${conv.testCase.title}" → "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"` });
-                
-                const basePayload = { ...conv.testCase.initialPayload, conversationId: conv.testCase.id };
-                
-                // Smart detection: Find which field contains a string value (likely the message)
-                // Prioritize common message field names, but also detect any string field
-                let messageField = null;
-                
-                // First pass: Look for common message field names
-                const commonFields = ['input', 'message', 'text', 'query', 'prompt', 'content', 'body', 'msg'];
-                for (const field of commonFields) {
-                    const foundKey = Object.keys(basePayload).find(k => k.toLowerCase() === field || k.toLowerCase().includes(field));
-                    if (foundKey && typeof basePayload[foundKey] === 'string') {
-                        messageField = foundKey;
-                        break;
-                    }
+            // 🔥 Convertir RealDatabaseConfig a DatabaseConfig (estructura esperada por el auditor)
+            const dbConfig = {
+                type: config.realDatabaseConfig.type,
+                credentials: {
+                    url: config.realDatabaseConfig.url,
+                    key: config.realDatabaseConfig.key,
+                },
+                tables: config.realDatabaseConfig.tables,
+            };
+            
+            let successCount = 0;
+            let errorCount = 0;
+            
+            testCases.forEach(tc => {
+                try {
+                    // 🔥 Pasar el workflow para análisis inteligente de campos
+                    initializeRealDatabaseAuditor(tc.id, dbConfig as any, tc.initialPayload, config.workflow);
+                    successCount++;
+                    onProgress({ message: `   ✅ Auditor BD para "${tc.title}"` });
+                } catch (error) {
+                    errorCount++;
+                    console.error(`   ✗ Error inicializando auditor para "${tc.title}":`, error);
+                    onProgress({ message: `   ⚠️ Error en auditor BD para "${tc.title}": ${error}` });
                 }
-                
-                // Second pass: If not found, use any string field (excluding IDs and metadata)
-                if (!messageField) {
-                    const excludeFields = ['id', 'conversationid', 'sessionid', 'userid', 'timestamp', 'date'];
-                    messageField = Object.keys(basePayload).find(k => {
-                        const lowerKey = k.toLowerCase();
-                        return typeof basePayload[k] === 'string' && 
-                               !excludeFields.some(exclude => lowerKey.includes(exclude));
-                    });
-                }
-                
-                // Fallback: use 'input' as default
-                if (!messageField) {
-                    messageField = 'input';
-                    console.warn(`[${conv.testCase.title}] ⚠️ No se encontró campo de mensaje. Usando 'input' por defecto.`);
-                }
-                
-                // UPDATE that field with the new message
-                const userInput = { 
-                    ...basePayload,
-                    [messageField]: messageText
-                };
-                
-                console.log(`[${conv.testCase.title}] 📤 Turno ${turnCount}`);
-                console.log(`[${conv.testCase.title}] 📤 Campo detectado: "${messageField}"`);
-                console.log(`[${conv.testCase.title}] 📤 Nuevo valor: "${messageText}"`);
-                console.log(`[${conv.testCase.title}] 📤 Payload completo:`, JSON.stringify(userInput, null, 2));
-                
-                // Immediately show the user message in UI (before getting response)
-                const pendingStep: ExecutionStep = {
-                    nodeId: `Turn ${turnCount}`,
-                    status: 'RUNNING',
-                    input: userInput,
-                    output: null,
-                    log: 'Esperando respuesta...',
-                    durationMs: 0,
-                    timestamp: Date.now(),
-                };
-                onProgress({ 
-                    message: `  📨 Mensaje enviado: "${conv.testCase.title}"`,
-                    testCaseId: conv.testCase.id,
-                    step: pendingStep
-                });
-                
-                return fetch(config.endpointUrl!, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(userInput)
-                })
-                .then(async response => {
-                    const durationMs = Date.now() - turnStartTime;
-                    if (!response.ok) {
-                        throw new Error(`Endpoint returned status ${response.status}: ${response.statusText}`);
-                    }
-                    const responseData = await response.json();
-                    onProgress({ message: `  ✅ "${conv.testCase.title}" respondió en ${durationMs}ms` });
-                    return { 
-                        status: 'SUCCESS' as const, 
-                        output: responseData, 
-                        input: userInput, 
-                        log: `Success on Round ${turnCount}.`, 
-                        durationMs,
-                        conversationIndex: index  // Add index to match with conversation
-                    };
-                })
-                .catch(error => {
-                    const durationMs = Date.now() - turnStartTime;
-                    const logMessage = error instanceof Error ? error.message : "An unknown network error occurred.";
-                    onProgress({ message: `  ❌ Error en "${conv.testCase.title}": ${logMessage}` });
-                    return { 
-                        status: 'ERROR' as const, 
-                        output: null, 
-                        input: userInput, 
-                        log: logMessage, 
-                        durationMs,
-                        conversationIndex: index  // Add index to match with conversation
-                    };
-                });
             });
             
-            onProgress({ message: `⏳ Esperando respuestas del agente...` });
+            onProgress({ message: `✅ Auditores inicializados: ${successCount} éxitos, ${errorCount} errores` });
+        } else if (config.realDatabaseConfig) {
+            console.warn('\n⚠️ [DB Audit] Configuración de BD incompleta:', config.realDatabaseConfig);
+            onProgress({ message: `⚠️ Configuración de BD incompleta, auditoría de BD deshabilitada` });
+        } else {
+            console.log(`   ℹ️ No hay configuración de BD - auditoría de BD no habilitada`);
+        }
+        
+        onProgress({ message: `✅ Todas las personalidades cargadas. Iniciando conversaciones independientes...` });
+        onProgress({ message: `🔥 Modo asíncrono: Cada conversación avanzará a su propio ritmo` });
 
-            const turnResults = await Promise.all(fetchPromises);
-            onProgress({ message: `📥 Todas las respuestas recibidas. Procesando resultados...` });
+        // 🛑 Crear AbortController para poder cancelar todas las conversaciones
+        const abortController = new AbortController();
+        const abortSignal = abortController.signal;
 
-            // 3. Update conversation states with the results and notify UI
-            activeConversations.forEach((conv, index) => {
-                const result = turnResults[index];
-                const step: ExecutionStep = {
-                    nodeId: `Turn ${turnCount}`,
-                    status: result.status,
-                    input: result.input,
-                    output: result.output,
-                    log: result.log,
-                    durationMs: result.durationMs,
-                    timestamp: Date.now(),
-                };
-                
-                // CRITICAL: Add to conversation history BEFORE generating next message
-                conv.history.push(step);
-                
-                console.log(`\n[${conv.testCase.title}] ✅ Historia ACTUALIZADA después del turno ${turnCount}`);
-                console.log(`[${conv.testCase.title}] Nuevo tamaño del historial: ${conv.history.length} turnos`);
-                console.log(`[${conv.testCase.title}] Último mensaje del usuario: "${findUserMessageText(step.input)}"`);
-                console.log(`[${conv.testCase.title}] Última respuesta del agente: "${findAgentMessageText(step.output).substring(0, 100)}..."`);
-                console.log(`[${conv.testCase.title}] Todos los mensajes del usuario hasta ahora:`, conv.history.map(h => findUserMessageText(h.input)));
-                
-                onProgress({ 
-                    message: `Processed Turn ${turnCount} for "${conv.testCase.title}". Status: ${step.status}`,
-                    testCaseId: conv.testCase.id,
-                    step: step
-                });
+        // 🚀 EJECUTAR TODAS LAS CONVERSACIONES EN PARALELO (cada una independiente)
+        const conversationPromises = conversations.map((conv, index) => 
+            runConversationIndependently(conv, index, config, onProgress, language, abortSignal)
+        );
 
-                if (step.status === 'ERROR') {
-                    conv.isComplete = true;
-                    conv.finalStatus = 'ERROR';
-                    onProgress({ message: `⛔ Conversación "${conv.testCase.title}" terminó con error.` });
-                }
-            });
-
-            // 4. Check for goal completion on successful turns
-            const successfulConversations = activeConversations.filter((c, i) => turnResults[i].status === 'SUCCESS' && !c.isComplete);
-            if (successfulConversations.length > 0) {
-                 onProgress({ message: `🎯 Verificando cumplimiento de objetivos para ${successfulConversations.length} conversación(es)...`});
-                 const goalCheckPromises = successfulConversations.map(conv =>
-                    checkIfGoalIsMet(conv.testCase, conv.history, language)
-                        .then(isMet => ({ testCaseId: conv.testCase.id, isMet }))
-                );
-                const goalCompletionResults = await Promise.all(goalCheckPromises);
-
-                goalCompletionResults.forEach(goalResult => {
-                    if (goalResult.isMet) {
-                        const conversation = conversations.find(c => c.testCase.id === goalResult.testCaseId);
-                        if (conversation && !conversation.isComplete) {
-                            conversation.isComplete = true;
-                            conversation.finalStatus = 'SUCCESS';
-                            onProgress({ message: `🎉 Objetivo cumplido: "${conversation.testCase.title}" - Conversación finalizada.` });
-                        }
-                    }
-                });
+        // Esperar a que TODAS las conversaciones terminen (o sean canceladas)
+        try {
+            await Promise.all(conversationPromises);
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                console.log('🛑 Todas las conversaciones fueron canceladas');
+                onProgress({ message: '🛑 Auditoría cancelada por el usuario' });
+            } else {
+                throw error; // Re-throw otros errores
             }
-        } // End of main loop
+        }
 
+        onProgress({ message: "\n🎉 Todas las conversaciones finalizadas!" });
+
+        // TODO: El código viejo del bucle sincrónico se eliminó.
+        // Ahora cada conversación avanza independientemente en runConversationIndependently()
+        
+        // ✅ Conversaciones ejecutadas en paralelo - código viejo eliminado
+        
         onProgress({ message: "\n━━━━━━━━━━━━━━━━━━━━━━" });
         onProgress({ message: "📊 Todas las rondas completadas. Analizando resultados finales..." });
 
@@ -714,18 +759,85 @@ export const runFullAudit = async (
             onProgress({ message: `🔍 Analizando resultado final: "${conv.testCase.title}"...` });
             const finalStatus = conv.finalStatus === 'PENDING' ? 'SUCCESS' : conv.finalStatus;
             const analysis = await analyzeResult(config, { id: conv.testCase.id, testCase: conv.testCase, executionTrace: conv.history, finalStatus }, language);
+            
+            // 🗄️ Obtener resumen de BD ANTES de limpiar
+            let databaseActivity = undefined;
+            if (config.realDatabaseConfig && config.realDatabaseConfig.url) {
+                const auditor = getRealDatabaseAuditor(conv.testCase.id);
+                if (auditor) {
+                    databaseActivity = auditor.getSummary();
+                    onProgress({ message: `   📊 Actividad BD: ${databaseActivity.totalOperations} operaciones, ${databaseActivity.changes?.length || 0} cambios` });
+                }
+            }
+            
+            // ⏱️ Calcular duración de la conversación
+            const durationMs = (conv.endTime && conv.startTime) ? (conv.endTime - conv.startTime) : undefined;
+            if (durationMs) {
+                onProgress({ message: `   ⏱️ Duración: ${(durationMs / 1000).toFixed(1)}s` });
+            }
+            
             const result: AuditResult = {
                 id: conv.testCase.id,
                 testCase: conv.testCase,
                 executionTrace: conv.history,
                 finalStatus,
-                analysis
+                analysis,
+                databaseActivity, // ✅ Agregado
+                startTime: conv.startTime,
+                endTime: conv.endTime,
+                durationMs
             };
             onResultComplete(result);
             onProgress({ message: `✅ Análisis completo para "${conv.testCase.title}" - Score: ${analysis.overallScore.toFixed(1)}/10` });
         });
 
         await Promise.all(analysisPromises);
+        
+        // 🧹 Limpiar auditores de BD
+        if (config.realDatabaseConfig && config.realDatabaseConfig.url) {
+            testCases.forEach(tc => {
+                try {
+                    cleanupRealDatabaseAuditor(tc.id);
+                } catch (error) {
+                    console.error(`Error limpiando auditor para "${tc.id}":`, error);
+                }
+            });
+        }
+        
+        // ⏱️ Mostrar resumen de tiempos
+        const auditEndTime = Date.now();
+        const totalAuditDuration = auditEndTime - auditStartTime;
+        onProgress({ message: "\n⏱️━━━━━━━━━━━━━━━━━━━━━━" });
+        onProgress({ message: "⏱️ RESUMEN DE TIEMPOS" });
+        onProgress({ message: `⏱️ Duración Total: ${(totalAuditDuration / 1000).toFixed(1)}s (${(totalAuditDuration / 60000).toFixed(2)} minutos)` });
+        onProgress({ message: `⏱️ Inicio: ${new Date(auditStartTime).toLocaleTimeString('es-AR')}` });
+        onProgress({ message: `⏱️ Fin: ${new Date(auditEndTime).toLocaleTimeString('es-AR')}` });
+        
+        // Calcular estadísticas de conversaciones
+        const conversationsWithTiming = conversations.filter(c => c.startTime && c.endTime);
+        if (conversationsWithTiming.length > 0) {
+            const durations = conversationsWithTiming.map(c => (c.endTime! - c.startTime!) / 1000);
+            const avgDuration = durations.reduce((sum, d) => sum + d, 0) / durations.length;
+            const minDuration = Math.min(...durations);
+            const maxDuration = Math.max(...durations);
+            
+            onProgress({ message: `⏱️ Conversaciones: promedio ${avgDuration.toFixed(1)}s | min ${minDuration.toFixed(1)}s | max ${maxDuration.toFixed(1)}s` });
+        }
+        onProgress({ message: "⏱️━━━━━━━━━━━━━━━━━━━━━━\n" });
+        
+        // 💰 Mostrar resumen de costos
+        onProgress({ message: "\n💰━━━━━━━━━━━━━━━━━━━━━━" });
+        onProgress({ message: "💰 RESUMEN DE COSTOS" });
+        const costSummary = costTracker.getSummary();
+        onProgress({ message: `💰 Costo Total: $${costSummary.totalCostUSD.toFixed(6)} USD` });
+        onProgress({ message: `💰   - Sistema: $${costSummary.systemCostUSD.toFixed(6)} USD` });
+        onProgress({ message: `💵   - Webhook Usuario: $${costSummary.webhookCostUSD.toFixed(6)} USD` });
+        onProgress({ message: `💰 Tokens Totales: ${costSummary.totalTokens.toLocaleString()}` });
+        onProgress({ message: `💰   - Input: ${costSummary.promptTokens.toLocaleString()} tokens` });
+        onProgress({ message: `💰   - Output: ${costSummary.responseTokens.toLocaleString()} tokens` });
+        onProgress({ message: "💰━━━━━━━━━━━━━━━━━━━━━━\n" });
+        costTracker.printSummary(); // Log detallado en consola
+        
         onProgress({ message: "\n🏁 AUDITORÍA COMPLETA - Todos los resultados procesados." });
         onAllComplete();
 
@@ -778,6 +890,17 @@ export const suggestAuditCriteria = async (workflow: WorkflowNode[], connections
             },
         },
     });
+
+    // 💰 Track usage
+    if (response.usageMetadata) {
+        costTracker.recordUsage({
+            promptTokens: response.usageMetadata.promptTokenCount || 0,
+            responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+            totalTokens: response.usageMetadata.totalTokenCount || 0,
+            model: 'gemini-2.5-flash',
+            operation: 'suggest_audit_criteria'
+        });
+    }
 
     try {
         const jsonText = response.text.trim();

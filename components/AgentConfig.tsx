@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection, HistoricalAudit } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';
 import Card from './Card';
@@ -10,6 +10,7 @@ import { XCircleIcon } from './icons/XCircleIcon';
 import { CheckCircleIcon } from './icons/CheckCircleIcon';
 import { SparklesIcon } from './icons/SparklesIcon';
 import { suggestAuditCriteria, generateSamplePayload } from '../services/geminiService';
+import { analyzeWorkflowPayload } from '../services/workflowPayloadAnalyzer';
 import Loader from './Loader';
 import { EyeIcon } from './icons/EyeIcon';
 import { BoltIcon } from './icons/BoltIcon';
@@ -19,9 +20,10 @@ import { ExclamationTriangleIcon } from './icons/ExclamationTriangleIcon';
 interface AgentConfigProps {
   onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => void;
   onViewHistory: (item: HistoricalAudit) => void;
+  initialConfig?: AuditConfig | null;
 }
 
-const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }) => {
+const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, initialConfig }) => {
   const { t, language } = useTranslation();
   
   const DEFAULT_CRITERIA = useMemo(() => [
@@ -38,6 +40,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
   const [newCriterion, setNewCriterion] = useState('');
   const [testCaseCount, setTestCaseCount] = useState(5);
   const [parsedN8nData, setParsedN8nData] = useState<ParsedN8nWorkflow | null>(null);
+  const [rawN8nJson, setRawN8nJson] = useState<string | null>(null); // 🔥 NUEVO
   const [fileError, setFileError] = useState<string | null>(null);
   const [isSuggestingCriteria, setIsSuggestingCriteria] = useState(false);
   
@@ -51,6 +54,71 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
   const [isGeneratingPayload, setIsGeneratingPayload] = useState(false);
   
   const [auditType, setAuditType] = useState<'visual' | 'real'>('visual');
+  const [enableDatabase, setEnableDatabase] = useState(false);
+  const [databaseSchema, setDatabaseSchema] = useState<string>('{\n  "productos": [\n    {"id": "prod_1", "nombre": "Cielorraso PVC", "precio": 4500}\n  ],\n  "clientes": [],\n  "pedidos": []\n}');
+  
+  // Real Database Config
+  const [useRealDatabase, setUseRealDatabase] = useState(false);
+  const [supabaseUrl, setSupabaseUrl] = useState('');
+  const [supabaseKey, setSupabaseKey] = useState('');
+  const [availableTables, setAvailableTables] = useState<string[]>([]);
+  const [selectedTables, setSelectedTables] = useState<string[]>([]);
+  const [isLoadingTables, setIsLoadingTables] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [tableSearchTerm, setTableSearchTerm] = useState('');
+  const [testConnectionMessage, setTestConnectionMessage] = useState<string>('');
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+
+  // Pre-llenar campos cuando hay initialConfig (Re-auditar)
+  useEffect(() => {
+    if (initialConfig) {
+      console.log('🔄 Cargando config para Re-auditar:', initialConfig);
+      
+      // Cargar configuración general
+      setAuditType(initialConfig.auditType);
+      setCriteria(initialConfig.criteria);
+      setTestCaseCount(initialConfig.testCaseCount);
+      setWorkflow(initialConfig.workflow || []);
+      setConnections(initialConfig.connections || []);
+      setEndpointUrl(initialConfig.endpointUrl || '');
+      
+      // 🔥 NUEVO: Reconstruir parsedN8nData desde rawN8nJson
+      if (initialConfig.rawN8nJson) {
+        try {
+          const parsedWorkflow = parseN8nWorkflow(initialConfig.rawN8nJson);
+          setParsedN8nData(parsedWorkflow);
+          setRawN8nJson(initialConfig.rawN8nJson);
+          console.log('✅ Workflow n8n reconstruido desde JSON guardado');
+        } catch (error) {
+          console.error('❌ Error reconstruyendo workflow:', error);
+        }
+      }
+      
+      // Cargar payload sample
+      if (initialConfig.samplePayload) {
+        setSamplePayload(initialConfig.samplePayload);
+        setRawPayloadText(JSON.stringify(initialConfig.samplePayload, null, 2));
+      }
+      
+      // Cargar config de BD mock
+      if (initialConfig.enableDatabaseTracking) {
+        setEnableDatabase(true);
+        if (initialConfig.databaseSchema) {
+          setDatabaseSchema(JSON.stringify(initialConfig.databaseSchema, null, 2));
+        }
+      }
+      
+      // Cargar config de BD real (Supabase)
+      if (initialConfig.realDatabaseConfig) {
+        setUseRealDatabase(true);
+        setSupabaseUrl(initialConfig.realDatabaseConfig.url);
+        setSupabaseKey(initialConfig.realDatabaseConfig.key);
+        setSelectedTables(initialConfig.realDatabaseConfig.tables);
+        setAvailableTables(initialConfig.realDatabaseConfig.tables); // Al menos las que estaban seleccionadas
+        setConnectionStatus('success'); // Marcar como conectado
+      }
+    }
+  }, [initialConfig]);
 
   const fetchAndSetCriteria = async (workflowForSuggestion: WorkflowNode[], connectionsForSuggestion: N8nConnection[]) => {
     setIsSuggestingCriteria(true);
@@ -68,6 +136,146 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
     }
   };
 
+  const handleConnectToSupabase = async () => {
+    if (!supabaseUrl.trim() || !supabaseKey.trim()) {
+      setFileError("Por favor ingresa la URL y Key de Supabase");
+      return;
+    }
+
+    setIsLoadingTables(true);
+    setConnectionStatus('idle');
+    setFileError(null);
+
+    try {
+      const { fetchSupabaseTables } = await import('../services/supabaseTablesFetcher');
+      const tables = await fetchSupabaseTables(supabaseUrl.trim(), supabaseKey.trim());
+      
+      if (tables.length === 0) {
+        setFileError("No se encontraron tablas. Verifica que la base de datos tenga tablas o que tengas permisos de lectura.");
+        setConnectionStatus('error');
+      } else {
+        setAvailableTables(tables);
+        setConnectionStatus('success');
+        setFileError(null);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Error al conectar con Supabase";
+      setFileError(message);
+      setConnectionStatus('error');
+      setAvailableTables([]);
+    } finally {
+      setIsLoadingTables(false);
+    }
+  };
+
+  // 🔥 NUEVO: Test exhaustivo de conexión y RLS
+  const handleTestDatabaseConnection = async () => {
+    if (!supabaseUrl.trim() || !supabaseKey.trim()) {
+      setTestConnectionMessage("❌ Por favor ingresa URL y Key de Supabase");
+      return;
+    }
+    
+    if (selectedTables.length === 0) {
+      setTestConnectionMessage("❌ Por favor selecciona al menos una tabla para testear");
+      return;
+    }
+
+    setIsTestingConnection(true);
+    setTestConnectionMessage("🔄 Testeando conexión...");
+
+    try {
+      // Importar el cliente de Supabase
+      const { createClient } = await import('@supabase/supabase-js');
+      const client = createClient(supabaseUrl.trim(), supabaseKey.trim(), {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        }
+      });
+
+      let successCount = 0;
+      let rlsWarnings = 0;
+      const results: string[] = [];
+
+      // Testear cada tabla seleccionada
+      for (const table of selectedTables) {
+        try {
+          const { data, error } = await client
+            .from(table)
+            .select('*')
+            .limit(1);
+
+          if (error) {
+            results.push(`❌ ${table}: ${error.message}`);
+          } else if (!data || data.length === 0) {
+            rlsWarnings++;
+            results.push(`⚠️ ${table}: 0 registros (¿RLS activo o tabla vacía?)`);
+          } else {
+            successCount++;
+            results.push(`✅ ${table}: Conectado correctamente (${data.length} registro de prueba)`);
+          }
+        } catch (err) {
+          results.push(`❌ ${table}: ${err instanceof Error ? err.message : 'Error desconocido'}`);
+        }
+      }
+
+      // Generar mensaje resumen
+      let message = `\n📊 RESULTADO DEL TEST:\n\n`;
+      message += results.join('\n') + '\n\n';
+      
+      if (successCount === selectedTables.length) {
+        message += `✅ EXCELENTE: Todas las ${successCount} tablas son accesibles.\n`;
+        message += `✅ La auditoría de BD funcionará correctamente.`;
+      } else if (rlsWarnings > 0 && successCount === 0) {
+        message += `🚨 PROBLEMA CRÍTICO: 0 registros en todas las tablas.\n\n`;
+        message += `Posibles causas:\n`;
+        message += `1. Row Level Security (RLS) está bloqueando las consultas\n`;
+        message += `2. Las tablas están vacías\n\n`;
+        message += `✅ SOLUCIÓN: Usa la 'service_role' key en vez de 'anon' key\n`;
+        message += `📍 La encuentras en: Supabase Dashboard → Settings → API → Project API keys`;
+      } else if (rlsWarnings > 0) {
+        message += `⚠️ ADVERTENCIA: ${rlsWarnings} tabla(s) devolvieron 0 registros.\n`;
+        message += `Esto puede afectar la precisión de la auditoría de BD.\n`;
+        message += `Recomendación: Verifica RLS o usa 'service_role' key.`;
+      } else {
+        message += `⚠️ Algunos problemas detectados.\n`;
+        message += `Revisa los errores arriba antes de continuar.`;
+      }
+
+      setTestConnectionMessage(message);
+      
+      // Actualizar estado general de conexión
+      if (successCount > 0) {
+        setConnectionStatus('success');
+      } else {
+        setConnectionStatus('error');
+      }
+
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Error desconocido";
+      setTestConnectionMessage(`❌ ERROR DE CONEXIÓN:\n\n${message}\n\nVerifica que la URL y Key sean correctas.`);
+      setConnectionStatus('error');
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
+
+  const handleToggleTable = (table: string) => {
+    setSelectedTables(prev => 
+      prev.includes(table) 
+        ? prev.filter(t => t !== table)
+        : [...prev, table]
+    );
+  };
+
+  const handleSelectAllTables = () => {
+    if (selectedTables.length === availableTables.length) {
+      setSelectedTables([]);
+    } else {
+      setSelectedTables([...availableTables]);
+    }
+  };
+
   const handleGeneratePayload = async (workflowForGen?: WorkflowNode[], connectionsForGen?: N8nConnection[]) => {
     const wf = workflowForGen || workflow;
     const conns = connectionsForGen || connections;
@@ -77,12 +285,38 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
     setIsGeneratingPayload(true);
     setPayloadError(null);
     try {
+      // 🔥 ESTRATEGIA 1: Analizar el SEGUNDO NODO del workflow (más rápido y preciso)
+      if (parsedN8nData && parsedN8nData.rawNodes && parsedN8nData.rawNodes.length >= 2) {
+        console.log('🔍 Intentando extraer payload del segundo nodo del workflow...');
+        const payloadSchema = analyzeWorkflowPayload(parsedN8nData.rawNodes);
+        
+        if (payloadSchema && Object.keys(payloadSchema.examplePayload).length > 0) {
+          console.log('✅ Payload extraído del workflow:', payloadSchema.examplePayload);
+          setSamplePayload(payloadSchema.examplePayload);
+          setRawPayloadText(JSON.stringify(payloadSchema.examplePayload, null, 2));
+          setIsGeneratingPayload(false);
+          return;
+        } else {
+          console.warn('⚠️ No se pudo extraer payload del segundo nodo.');
+          console.warn('   Razones posibles:');
+          console.warn('   - El segundo nodo NO es un nodo "Set" o "Code"');
+          console.warn('   - El nodo Set no tiene campos configurados');
+          console.warn('   - La estructura del nodo no es la esperada');
+          console.warn('   Usando Gemini AI como fallback...');
+        }
+      } else {
+        console.warn('⚠️ No hay suficientes nodos en el workflow (se necesitan al menos 2)');
+      }
+      
+      // 🔥 ESTRATEGIA 2 (FALLBACK): Usar Gemini AI para generar el payload
+      console.log('🤖 Generando payload con Gemini AI (puede tardar unos segundos)...');
       const payload = await generateSamplePayload(wf, conns, language);
       setSamplePayload(payload);
       setRawPayloadText(JSON.stringify(payload, null, 2));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not generate payload.";
       setPayloadError(message);
+      console.error('❌ Error generando payload:', error);
     } finally {
       setIsGeneratingPayload(false);
     }
@@ -106,6 +340,9 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
       try {
         const text = e.target?.result as string;
         if (!text) throw new Error("File is empty.");
+        
+        // 🔥 NUEVO: Guardar el JSON original para re-auditar
+        setRawN8nJson(text);
         
         const parsedWorkflow = parseN8nWorkflow(text);
         if (parsedWorkflow.detectedEndpoints && parsedWorkflow.detectedEndpoints.length > 0) {
@@ -253,6 +490,36 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
     const isWorkflowValid = workflow.every(node => 
       node.type === 'tool' || (node.type === 'agent' && node.systemPrompt.trim())
     );
+    
+    let parsedDatabaseSchema: Record<string, any[]> | undefined = undefined;
+    if (enableDatabase) {
+      try {
+        parsedDatabaseSchema = JSON.parse(databaseSchema);
+      } catch (error) {
+        setFileError("Invalid database schema JSON. Please check the format.");
+        return;
+      }
+    }
+    
+    let realDbConfig = undefined;
+    if (useRealDatabase) {
+      if (!supabaseUrl.trim() || !supabaseKey.trim()) {
+        setFileError("Please provide Supabase URL and Key for real database auditing.");
+        return;
+      }
+      if (selectedTables.length === 0) {
+        setFileError("Please select at least one table to monitor.");
+        return;
+      }
+      
+      realDbConfig = {
+        type: 'supabase' as const,
+        url: supabaseUrl.trim(),
+        key: supabaseKey.trim(),
+        tables: selectedTables
+      };
+    }
+    
     if (isWorkflowValid && criteria.length > 0) {
       const config: AuditConfig = { 
           workflow, 
@@ -261,7 +528,11 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
           testCaseCount, 
           samplePayload, 
           auditType,
-          endpointUrl: auditType === 'real' ? endpointUrl : undefined
+          endpointUrl: auditType === 'real' ? endpointUrl : undefined,
+          enableDatabaseTracking: enableDatabase,
+          databaseSchema: parsedDatabaseSchema,
+          realDatabaseConfig: realDbConfig,
+          rawN8nJson: rawN8nJson || undefined // 🔥 NUEVO: Guardar JSON original
       };
       onStartAudit({ config, n8nData: parsedN8nData });
     }
@@ -430,12 +701,231 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory }
               id="test-case-count"
               type="range"
               min="1"
-              max="10"
+              max="100"
               step="1"
               value={testCaseCount}
               onChange={(e) => setTestCaseCount(parseInt(e.target.value, 10))}
               className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer"
             />
+          </div>
+
+          <div className="p-4 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 border border-purple-200 dark:border-purple-700 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <input 
+                  type="checkbox" 
+                  id="enable-database" 
+                  checked={enableDatabase}
+                  onChange={(e) => setEnableDatabase(e.target.checked)}
+                  className="w-5 h-5 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 dark:focus:ring-purple-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+                />
+                <label htmlFor="enable-database" className="text-lg font-medium text-gray-700 dark:text-gray-300 cursor-pointer">
+                  🗄️ Habilitar Auditoría de Base de Datos (Mock)
+                </label>
+              </div>
+            </div>
+            
+            {enableDatabase && (
+              <div className="mt-3 space-y-2">
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  Define el esquema inicial de la base de datos. El sistema verificará que el agente consulte y manipule correctamente esta información.
+                </p>
+                <textarea
+                  value={databaseSchema}
+                  onChange={(e) => setDatabaseSchema(e.target.value)}
+                  className="w-full p-3 bg-white dark:bg-gray-800 border border-purple-300 dark:border-purple-600 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 font-mono text-sm"
+                  rows={8}
+                  placeholder='{\n  "productos": [...],\n  "clientes": [...]\n}'
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="p-4 bg-gradient-to-r from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 border border-blue-200 dark:border-blue-700 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <input 
+                  type="checkbox" 
+                  id="use-real-database" 
+                  checked={useRealDatabase}
+                  onChange={(e) => setUseRealDatabase(e.target.checked)}
+                  className="w-5 h-5 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+                />
+                <label htmlFor="use-real-database" className="text-lg font-medium text-gray-700 dark:text-gray-300 cursor-pointer">
+                  🔗 Conectar a Base de Datos Real (Supabase)
+                </label>
+              </div>
+            </div>
+            
+            <p className="text-xs text-blue-700 dark:text-blue-300 mb-3 bg-blue-100 dark:bg-blue-900/30 p-2 rounded">
+              ⚠️ <strong>Importante:</strong> Esto verificará que el bot realmente haga lo que dice (ej: que sí creó la cita, que no bloqueó al usuario, etc.)
+            </p>
+            
+            {useRealDatabase && (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Supabase URL
+                  </label>
+                  <input
+                    type="url"
+                    value={supabaseUrl}
+                    onChange={(e) => {
+                      setSupabaseUrl(e.target.value);
+                      setConnectionStatus('idle');
+                      setAvailableTables([]);
+                      setSelectedTables([]);
+                    }}
+                    placeholder="https://tu-proyecto.supabase.co"
+                    className="w-full p-2 bg-white dark:bg-gray-800 border border-blue-300 dark:border-blue-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Supabase Key
+                  </label>
+                  <input
+                    type="password"
+                    value={supabaseKey}
+                    onChange={(e) => {
+                      setSupabaseKey(e.target.value);
+                      setConnectionStatus('idle');
+                      setAvailableTables([]);
+                      setSelectedTables([]);
+                    }}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    className="w-full p-2 bg-white dark:bg-gray-800 border border-blue-300 dark:border-blue-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm font-mono"
+                  />
+                  {/* 🚨 Advertencia sobre RLS */}
+                  <div className="mt-2 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg">
+                    <div className="flex items-start gap-2">
+                      <span className="text-yellow-600 dark:text-yellow-400 text-lg flex-shrink-0">⚠️</span>
+                      <div className="text-xs text-yellow-800 dark:text-yellow-200">
+                        <p className="font-semibold mb-1">Si tienes Row Level Security (RLS) activo:</p>
+                        <ul className="list-disc list-inside space-y-1 ml-2">
+                          <li>Usa la <span className="font-mono bg-yellow-100 dark:bg-yellow-900/40 px-1 py-0.5 rounded">service_role</span> key para auditar correctamente</li>
+                          <li>Con <span className="font-mono bg-yellow-100 dark:bg-yellow-900/40 px-1 py-0.5 rounded">anon</span> key, RLS bloqueará las consultas y verás 0 registros</li>
+                          <li>⚠️ La service_role key bypasea RLS - úsala solo en ambientes seguros</li>
+                        </ul>
+                        <p className="mt-2 text-yellow-700 dark:text-yellow-300">
+                          📍 Encuentras la service_role key en: <span className="font-mono text-xs">Settings → API → Project API keys</span>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  type="button"
+                  onClick={handleConnectToSupabase}
+                  disabled={isLoadingTables || !supabaseUrl.trim() || !supabaseKey.trim()}
+                  className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium transition"
+                >
+                  {isLoadingTables ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Conectando...
+                    </>
+                  ) : connectionStatus === 'success' ? (
+                    <>
+                      ✓ Reconectar a Supabase
+                    </>
+                  ) : (
+                    '🔗 Conectar a Supabase'
+                  )}
+                </button>
+
+                {/* 🔥 NUEVO: Botón de test de conexión */}
+                {connectionStatus === 'success' && selectedTables.length > 0 && (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleTestDatabaseConnection}
+                      disabled={isTestingConnection}
+                      className="w-full py-2 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium transition"
+                    >
+                      {isTestingConnection ? (
+                        <>
+                          <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Testeando...
+                        </>
+                      ) : (
+                        <>
+                          🧪 Testear Conexión y RLS
+                        </>
+                      )}
+                    </button>
+
+                    {testConnectionMessage && (
+                      <div className="p-3 bg-gray-900 text-gray-100 text-xs font-mono rounded-lg whitespace-pre-wrap border border-gray-700 max-h-60 overflow-y-auto">
+                        {testConnectionMessage}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {connectionStatus === 'success' && availableTables.length > 0 && (
+                  <div className="p-3 bg-white dark:bg-gray-800 border border-blue-300 dark:border-blue-600 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Selecciona las tablas a monitorear ({selectedTables.length}/{availableTables.length})
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleSelectAllTables}
+                        className="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                      >
+                        {selectedTables.length === availableTables.length ? 'Deseleccionar todas' : 'Seleccionar todas'}
+                      </button>
+                    </div>
+                    
+                    {/* Buscador de tablas */}
+                    <div className="mb-2">
+                      <input
+                        type="text"
+                        value={tableSearchTerm}
+                        onChange={(e) => setTableSearchTerm(e.target.value)}
+                        placeholder="🔍 Buscar tabla..."
+                        className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                      />
+                      {tableSearchTerm && (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          {availableTables.filter(t => t.toLowerCase().includes(tableSearchTerm.toLowerCase())).length} tabla(s) encontrada(s)
+                        </p>
+                      )}
+                    </div>
+                    
+                    <div className="max-h-60 overflow-y-auto space-y-1">
+                      {availableTables
+                        .filter(table => 
+                          table.toLowerCase().includes(tableSearchTerm.toLowerCase())
+                        )
+                        .map(table => (
+                        <label
+                          key={table}
+                          className="flex items-center gap-2 p-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded cursor-pointer transition"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedTables.includes(table)}
+                            onChange={() => handleToggleTable(table)}
+                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+                          />
+                          <span className="text-sm text-gray-700 dark:text-gray-300 font-mono">{table}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div>

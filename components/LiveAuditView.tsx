@@ -135,7 +135,11 @@ const ChatListItem: React.FC<{ result: AuditResult; isSelected: boolean; onClick
                 <p className="text-gray-600 dark:text-gray-400">📱 {telefono}</p>
             </div>
             
-            <p className="text-xs text-gray-500 dark:text-gray-500 italic mb-1 truncate">{result.testCase.persona}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-500 italic mb-1 truncate">
+                {typeof result.testCase.persona === 'string' 
+                    ? result.testCase.persona 
+                    : JSON.stringify(result.testCase.persona)}
+            </p>
             
             <div className="flex justify-between items-center">
                 {lastMessage && <p className="text-xs text-gray-400 dark:text-gray-500">
@@ -181,20 +185,289 @@ const TestCaseInfoCard: React.FC<{ testCase: TestCase }> = ({ testCase }) => {
     );
 };
 
+const DatabaseActivityCard: React.FC<{ result: AuditResult }> = ({ result }) => {
+    if (!result.databaseActivity) return null;
+    
+    const { databaseActivity } = result;
+    const hasOperations = databaseActivity.totalOperations > 0;
+    const hasDiscrepancies = databaseActivity.discrepancies && databaseActivity.discrepancies.length > 0;
+    const criticalIssues = databaseActivity.discrepancies?.filter(d => d.severity === 'critical').length || 0;
+    
+    return (
+        <div className="mt-4 flex-shrink-0 bg-gradient-to-r from-indigo-100 to-purple-100 dark:from-indigo-900/30 dark:to-purple-900/30 rounded-lg p-4 border border-indigo-200 dark:border-indigo-700 shadow-md">
+            <h3 className="text-lg font-bold text-indigo-800 dark:text-indigo-200 flex items-center gap-2 mb-3">
+                <span className="text-2xl">🗄️</span>
+                Actividad de Base de Datos
+                {criticalIssues > 0 && (
+                    <span className="ml-auto bg-red-500 text-white text-xs px-2 py-1 rounded-full animate-pulse">
+                        {criticalIssues} Críticas
+                    </span>
+                )}
+            </h3>
+            
+            {hasOperations ? (
+                <div className="space-y-3">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3 text-center">
+                            <p className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{databaseActivity.totalOperations}</p>
+                            <p className="text-xs text-gray-600 dark:text-gray-400">Total</p>
+                        </div>
+                        <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3 text-center">
+                            <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{databaseActivity.reads}</p>
+                            <p className="text-xs text-gray-600 dark:text-gray-400">Lecturas</p>
+                        </div>
+                        <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3 text-center">
+                            <p className="text-2xl font-bold text-green-600 dark:text-green-400">{databaseActivity.writes}</p>
+                            <p className="text-xs text-gray-600 dark:text-gray-400">Escrituras</p>
+                        </div>
+                        <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3 text-center">
+                            <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{databaseActivity.updates}</p>
+                            <p className="text-xs text-gray-600 dark:text-gray-400">Actualizaciones</p>
+                        </div>
+                    </div>
+                    
+                    {hasDiscrepancies && (
+                        <div className="bg-gradient-to-br from-red-50 to-orange-50 dark:from-red-900/20 dark:to-orange-900/20 border-2 border-red-400 dark:border-red-600 rounded-xl p-4 shadow-lg">
+                            <div className="flex items-center justify-between mb-4">
+                                <h4 className="font-bold text-red-800 dark:text-red-200 text-base flex items-center gap-2">
+                                    <span className="text-2xl">🚨</span>
+                                    Verificación de Precios
+                                </h4>
+                                <span className="bg-red-500 text-white text-xs px-3 py-1 rounded-full font-bold">
+                                    {databaseActivity.discrepancies!.length} Error{databaseActivity.discrepancies!.length > 1 ? 'es' : ''}
+                                </span>
+                            </div>
+                            
+                            <div className="space-y-3 max-h-96 overflow-y-auto">
+                                {databaseActivity.discrepancies!.map((disc, idx) => {
+                                    // Extraer datos del description
+                                    const isIncorrect = disc.type === 'incorrect_data';
+                                    
+                                    return (
+                                        <div key={idx} className="bg-white dark:bg-gray-800 rounded-lg border-2 border-red-300 dark:border-red-700 overflow-hidden">
+                                            {/* Header con producto */}
+                                            <div className="bg-red-100 dark:bg-red-900/30 px-4 py-2 border-b-2 border-red-300 dark:border-red-700">
+                                                <p className="font-bold text-gray-800 dark:text-gray-200 text-sm">
+                                                    #{idx + 1} - {disc.table || 'Producto'}
+                                                </p>
+                                            </div>
+                                            
+                                            {/* Comparación de datos */}
+                                            <div className="p-4">
+                                                <div className="grid grid-cols-2 gap-4 mb-3">
+                                                    {/* Lo que dijo el bot */}
+                                                    <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-3 border border-red-200 dark:border-red-800">
+                                                        <p className="text-xs text-red-600 dark:text-red-400 font-semibold mb-1">🤖 BOT OFRECIÓ</p>
+                                                        <p className="text-2xl font-bold text-red-700 dark:text-red-300">
+                                                            ${disc.expected !== undefined ? Number(disc.expected).toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '?'}
+                                                        </p>
+                                                        <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">por unidad</p>
+                                                    </div>
+                                                    
+                                                    {/* Lo que está en BD */}
+                                                    <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3 border border-green-200 dark:border-green-800">
+                                                        <p className="text-xs text-green-600 dark:text-green-400 font-semibold mb-1">✅ BASE DE DATOS</p>
+                                                        <p className="text-2xl font-bold text-green-700 dark:text-green-300">
+                                                            ${disc.actual !== undefined ? Number(disc.actual).toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '?'}
+                                                        </p>
+                                                        <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">precio real</p>
+                                                    </div>
+                                                </div>
+                                                
+                                                {/* Diferencia */}
+                                                {disc.expected !== undefined && disc.actual !== undefined && (
+                                                    <div className="bg-gray-100 dark:bg-gray-900/30 rounded-lg p-3 border border-gray-300 dark:border-gray-700">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Diferencia</p>
+                                                                <p className="text-xl font-bold text-orange-600 dark:text-orange-400">
+                                                                    {disc.expected > disc.actual ? '+' : '-'}${Math.abs(disc.expected - disc.actual).toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                                                                </p>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Porcentaje</p>
+                                                                <p className="text-xl font-bold text-orange-600 dark:text-orange-400">
+                                                                    {disc.actual !== 0 ? `${(((disc.expected - disc.actual) / disc.actual) * 100).toFixed(1)}%` : 'N/A'}
+                                                                </p>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <div className={`text-3xl ${disc.expected === disc.actual ? 'text-green-500' : 'text-red-500'}`}>
+                                                                    {disc.expected === disc.actual ? '✓' : '✗'}
+                                                                </div>
+                                                                <p className={`text-xs font-bold mt-1 ${disc.expected === disc.actual ? 'text-green-600' : 'text-red-600'}`}>
+                                                                    {disc.expected === disc.actual ? 'CORRECTO' : 'INCORRECTO'}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                
+                                                {/* Descripción adicional (más pequeña) */}
+                                                <p className="text-xs text-gray-600 dark:text-gray-400 mt-2 italic">
+                                                    {disc.description}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Modificaciones en la BD */}
+                    {databaseActivity.changes && databaseActivity.changes.length > 0 && (
+                        <div className="bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 border-2 border-blue-400 dark:border-blue-600 rounded-xl p-4 shadow-lg">
+                            <div className="flex items-center justify-between mb-4">
+                                <h4 className="font-bold text-blue-800 dark:text-blue-200 text-base flex items-center gap-2">
+                                    <span className="text-2xl">📝</span>
+                                    Modificaciones en Base de Datos
+                                </h4>
+                                <span className="bg-blue-500 text-white text-xs px-3 py-1 rounded-full font-bold">
+                                    {databaseActivity.changes.length} Cambio{databaseActivity.changes.length > 1 ? 's' : ''}
+                                </span>
+                            </div>
+                            
+                            <div className="space-y-2 max-h-80 overflow-y-auto">
+                                {databaseActivity.changes.map((change, idx) => (
+                                    <div key={idx} className={`rounded-lg p-3 border-2 ${
+                                        change.type === 'INSERT' ? 'bg-green-50 dark:bg-green-900/20 border-green-400' :
+                                        change.type === 'UPDATE' ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-400' :
+                                        'bg-red-50 dark:bg-red-900/20 border-red-400'
+                                    }`}>
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <span className="text-lg">
+                                                        {change.type === 'INSERT' ? '➕' : change.type === 'UPDATE' ? '🔄' : '➖'}
+                                                    </span>
+                                                    <span className={`font-bold text-sm ${
+                                                        change.type === 'INSERT' ? 'text-green-700 dark:text-green-300' :
+                                                        change.type === 'UPDATE' ? 'text-yellow-700 dark:text-yellow-300' :
+                                                        'text-red-700 dark:text-red-300'
+                                                    }`}>
+                                                        {change.type === 'INSERT' ? 'INSERTÓ' : change.type === 'UPDATE' ? 'MODIFICÓ' : 'ELIMINÓ'}
+                                                    </span>
+                                                    <span className="text-xs text-gray-600 dark:text-gray-400">
+                                                        en tabla <span className="font-mono font-semibold">{change.table}</span>
+                                                    </span>
+                                                </div>
+                                                
+                                                {/* Datos del registro */}
+                                                {change.type === 'INSERT' && change.after && (
+                                                    <div className="bg-white dark:bg-gray-800 rounded p-2 text-xs font-mono">
+                                                        <pre className="text-green-700 dark:text-green-300 whitespace-pre-wrap">
+                                                            {JSON.stringify(change.after, null, 2).substring(0, 300)}
+                                                            {JSON.stringify(change.after).length > 300 ? '...' : ''}
+                                                        </pre>
+                                                    </div>
+                                                )}
+                                                
+                                                {change.type === 'UPDATE' && (
+                                                    <div className="space-y-2">
+                                                        {change.record.changedFields && (
+                                                            <div className="text-xs text-yellow-700 dark:text-yellow-300">
+                                                                Campos modificados: <span className="font-semibold">{change.record.changedFields.join(', ')}</span>
+                                                            </div>
+                                                        )}
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            <div className="bg-white dark:bg-gray-800 rounded p-2">
+                                                                <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Antes:</p>
+                                                                <pre className="text-xs font-mono text-red-600 dark:text-red-400 whitespace-pre-wrap">
+                                                                    {JSON.stringify(change.before, null, 2).substring(0, 150)}
+                                                                </pre>
+                                                            </div>
+                                                            <div className="bg-white dark:bg-gray-800 rounded p-2">
+                                                                <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Después:</p>
+                                                                <pre className="text-xs font-mono text-green-600 dark:text-green-400 whitespace-pre-wrap">
+                                                                    {JSON.stringify(change.after, null, 2).substring(0, 150)}
+                                                                </pre>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                
+                                                {change.type === 'DELETE' && change.before && (
+                                                    <div className="bg-white dark:bg-gray-800 rounded p-2 text-xs font-mono">
+                                                        <pre className="text-red-700 dark:text-red-300 whitespace-pre-wrap">
+                                                            {JSON.stringify(change.before, null, 2).substring(0, 300)}
+                                                            {JSON.stringify(change.before).length > 300 ? '...' : ''}
+                                                        </pre>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            
+                                            <span className={`ml-2 px-2 py-0.5 rounded text-xs font-bold ${
+                                                change.type === 'INSERT' ? 'bg-green-500 text-white' :
+                                                change.type === 'UPDATE' ? 'bg-yellow-500 text-white' :
+                                                'bg-red-500 text-white'
+                                            }`}>
+                                                {change.type}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {databaseActivity.tablesUsed.length > 0 && (
+                        <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3">
+                            <p className="font-semibold text-indigo-700 dark:text-indigo-300 mb-2 text-sm">Tablas utilizadas:</p>
+                            <div className="flex flex-wrap gap-2">
+                                {databaseActivity.tablesUsed.map(table => (
+                                    <span key={table} className="bg-indigo-200 dark:bg-indigo-700 text-indigo-800 dark:text-indigo-200 text-xs px-2 py-1 rounded-full">
+                                        {table}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    
+                    <div className="bg-white/60 dark:bg-gray-800/60 rounded-lg p-3 max-h-40 overflow-y-auto">
+                        <p className="font-semibold text-indigo-700 dark:text-indigo-300 mb-2 text-sm">Registro de operaciones:</p>
+                        <div className="space-y-1 text-xs font-mono">
+                            {databaseActivity.operations.slice(-10).map((op, idx) => (
+                                <div key={idx} className="flex justify-between items-center py-1 border-b border-gray-200 dark:border-gray-700">
+                                    <span className={`font-semibold ${
+                                        op.type === 'READ' ? 'text-blue-600' :
+                                        op.type === 'WRITE' ? 'text-green-600' :
+                                        op.type === 'UPDATE' ? 'text-yellow-600' :
+                                        'text-red-600'
+                                    }`}>{op.type}</span>
+                                    <span className="text-gray-600 dark:text-gray-400">{op.table}</span>
+                                    <span className="text-gray-500 dark:text-gray-500">{new Date(op.timestamp).toLocaleTimeString()}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            ) : (
+                <div className="text-center py-4 text-gray-500 dark:text-gray-400">
+                    <p>No se detectaron operaciones de base de datos</p>
+                </div>
+            )}
+        </div>
+    );
+};
+
 interface LiveAuditViewProps {
     results: AuditResult[];
     logs: string[];
     onCancel: () => void;
     totalCases: number;
     completedCases: number;
+    config?: any; // AuditConfig
 }
 
-const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, totalCases, completedCases }) => {
+const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, totalCases, completedCases, config }) => {
     const { t } = useTranslation();
     const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
     const logContainerRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
     const progressPercentage = totalCases > 0 ? (completedCases / totalCases) * 100 : 0;
+    
+    // 🗄️ Check if database auditing is active
+    const isDatabaseActive = config?.realDatabaseConfig && config.realDatabaseConfig.url && config.realDatabaseConfig.tables.length > 0;
 
     const sortedResults = useMemo(() => {
         return [...results].sort((a, b) => {
@@ -248,6 +521,32 @@ const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, 
                     ></div>
                     </div>
                 </div>
+
+                {/* 🔥 NUEVO: Indicador de auditoría de BD activa */}
+                {isDatabaseActive && (
+                    <div className="mt-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 border-2 border-indigo-300 dark:border-indigo-700 rounded-lg">
+                        <div className="flex items-center gap-3">
+                            <div className="relative">
+                                <div className="w-3 h-3 bg-indigo-500 rounded-full animate-pulse"></div>
+                                <div className="absolute inset-0 w-3 h-3 bg-indigo-500 rounded-full animate-ping opacity-75"></div>
+                            </div>
+                            <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-lg">🗄️</span>
+                                    <span className="font-semibold text-indigo-800 dark:text-indigo-200 text-sm">
+                                        Auditoría de Base de Datos Activa
+                                    </span>
+                                </div>
+                                <p className="text-xs text-indigo-600 dark:text-indigo-300 mt-0.5">
+                                    Monitoreando {config.realDatabaseConfig.tables.length} tabla(s): {config.realDatabaseConfig.tables.join(', ')}
+                                </p>
+                            </div>
+                            <span className="text-xs font-mono bg-indigo-200 dark:bg-indigo-800 text-indigo-800 dark:text-indigo-200 px-2 py-1 rounded">
+                                {config.realDatabaseConfig.type.toUpperCase()}
+                            </span>
+                        </div>
+                    </div>
+                )}
             </header>
 
             <div className="flex-grow flex relative overflow-hidden">
@@ -288,6 +587,7 @@ const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, 
                                    )}
                                </div>
                            </div>
+                           <DatabaseActivityCard result={selectedResult} />
                         </>
                     ) : (
                         <div className="flex-1 flex items-center justify-center text-center">
@@ -314,7 +614,26 @@ const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, 
                     <div className="space-y-1">
                         {logs.map((log, index) => {
                             const isRecent = index >= logs.length - 3;
-                            const color = log.includes('Error') || log.includes('failed') 
+                            
+                            // 🗄️ ESPECIAL: Logs de Base de Datos
+                            const isDBLog = log.includes('BD:') || log.includes('➕') || log.includes('🔄') || log.includes('➖');
+                            const isDBInsert = log.includes('INSERT') || log.includes('➕');
+                            const isDBUpdate = log.includes('UPDATE') || log.includes('🔄');
+                            const isDBDelete = log.includes('DELETE') || log.includes('➖');
+                            const isDBDiscrepancy = log.includes('DISCREPANCIAS') || log.includes('🚨');
+                            const isDBModifications = log.includes('modificaciones detectadas') || log.includes('📝');
+                            
+                            const color = isDBDiscrepancy 
+                                ? 'text-red-500 font-bold bg-red-900/20 px-2 py-1 rounded border-l-4 border-red-500'
+                                : isDBModifications
+                                ? 'text-cyan-400 font-bold bg-cyan-900/20 px-2 py-1 rounded border-l-4 border-cyan-500'
+                                : isDBInsert
+                                ? 'text-green-400 font-semibold bg-green-900/20 px-2 py-1 rounded'
+                                : isDBUpdate
+                                ? 'text-yellow-400 font-semibold bg-yellow-900/20 px-2 py-1 rounded'
+                                : isDBDelete
+                                ? 'text-red-400 font-semibold bg-red-900/20 px-2 py-1 rounded'
+                                : log.includes('Error') || log.includes('failed') 
                                 ? 'text-red-400' 
                                 : log.includes('Success') || log.includes('complete') 
                                 ? 'text-green-400' 
@@ -324,7 +643,8 @@ const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, 
                             
                             return (
                                 <p key={index} className={`whitespace-pre-wrap leading-relaxed transition-all duration-300 ${color} ${isRecent ? 'animate-slide-in font-semibold' : 'opacity-70'}`}>
-                                    <span className="text-green-500 mr-2">›</span>{log}
+                                    {!isDBLog && <span className="text-green-500 mr-2">›</span>}
+                                    {log}
                                 </p>
                             );
                         })}

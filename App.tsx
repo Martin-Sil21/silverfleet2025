@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit } from './types';
 import AgentConfig from './components/AgentConfig';
 import AuditReport from './components/AuditReport';
+import ExecutiveReport from './components/ExecutiveReport';
 import { generateTestCases, runFullAudit } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
@@ -92,25 +93,41 @@ const App: React.FC = () => {
 
     try {
       handleProgressUpdate({ message: `🎭 Generando ${data.config.testCaseCount} personalidades de prueba...` });
-      const testCases = await generateTestCases(data.config, language);
       
-      handleProgressUpdate({ message: `✅ ${testCases.length} personalidades creadas exitosamente` });
-      testCases.forEach((tc, idx) => {
-        const personaText = typeof tc.persona === 'string' ? tc.persona : JSON.stringify(tc.persona);
-        const shortPersona = personaText.length > 60 ? personaText.substring(0, 60) + '...' : personaText;
-        handleProgressUpdate({ message: `  👤 ${idx + 1}. "${tc.title}" - ${shortPersona}` });
-      });
-
-      if (data.config.auditType === 'real') {
-         const initialLiveResults: AuditResult[] = testCases.map(tc => ({
+      // 🔥 NUEVO: Acumular test cases generados
+      const allTestCases: TestCase[] = [];
+      let totalGenerated = 0;
+      
+      // 🚀 Callback para mostrar cada lote a medida que se genera
+      const onBatchGenerated = (batch: TestCase[]) => {
+        allTestCases.push(...batch);
+        totalGenerated += batch.length;
+        
+        handleProgressUpdate({ message: `   ✅ ${totalGenerated}/${data.config.testCaseCount} personalidades generadas...` });
+        
+        // Mostrar las personalidades del lote
+        batch.forEach((tc, idx) => {
+          const personaText = typeof tc.persona === 'string' ? tc.persona : JSON.stringify(tc.persona);
+          const shortPersona = personaText.length > 60 ? personaText.substring(0, 60) + '...' : personaText;
+          handleProgressUpdate({ message: `      👤 "${tc.title}" - ${shortPersona}` });
+        });
+        
+        // 🔥 NUEVO: Inicializar en UI inmediatamente para auditoría real
+        if (data.config.auditType === 'real') {
+          const batchResults: AuditResult[] = batch.map(tc => ({
             id: tc.id,
             testCase: tc,
             executionTrace: [],
             analysis: { overallScore: 0, summary: t('auditInProgress'), criteriaBreakdown: [] },
             finalStatus: 'SUCCESS', // Temporary
-         }));
-         setLiveAuditData(initialLiveResults);
-      }
+          }));
+          setLiveAuditData(prev => [...prev, ...batchResults]);
+        }
+      };
+      
+      const testCases = await generateTestCases(data.config, language, onBatchGenerated);
+      
+      handleProgressUpdate({ message: `🎉 ${testCases.length} personalidades listas! Iniciando auditoría...` });
 
       await runFullAudit(
         data.config,
@@ -144,6 +161,21 @@ const App: React.FC = () => {
     setIsViewingHistory(false);
   };
 
+  const handleReaudit = (config: AuditConfig) => {
+    console.log('🔄 Re-auditar clicked with config:', config);
+    // Guardar la configuración actual
+    setAuditConfig(config);
+    // Limpiar resultados previos
+    setAuditResults([]);
+    setLiveAuditData([]);
+    setLiveLogs([]);
+    setProgressMessage('');
+    setErrorMessage('');
+    // Volver a estado de configuración (para poder ver/editar antes de re-ejecutar)
+    setAuditStatus(AuditStatus.CONFIG);
+    setIsViewingHistory(false);
+  };
+
   const handleViewHistory = (item: HistoricalAudit) => {
     setAuditConfig(item.config);
     setAuditResults(item.results);
@@ -173,6 +205,7 @@ const App: React.FC = () => {
               onCancel={handleReset} 
               totalCases={auditConfig.testCaseCount}
               completedCases={auditResults.length}
+              config={auditConfig}
           />
         }
         // Fallback for visual audit without n8n data
@@ -184,7 +217,7 @@ const App: React.FC = () => {
         />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
-        return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} isHistoryView={isViewingHistory} />;
+        return <ExecutiveReport results={auditResults} config={auditConfig} onReset={handleReset} onReaudit={handleReaudit} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !auditResults.length || !auditConfig) {
             return (
@@ -215,7 +248,7 @@ const App: React.FC = () => {
         );
       case AuditStatus.CONFIG:
       default:
-        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} />;
+        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} initialConfig={auditConfig} />;
     }
   };
   
