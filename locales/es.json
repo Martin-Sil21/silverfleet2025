@@ -4,6 +4,7 @@
   "appDescription": "Un entorno de trabajo profesional para depurar visualmente, probar y evaluar tus flujos de n8n con un análisis de ejecución real paso a paso.",
   "footerText": "© {year} Auditor de Agentes de IA. Todos los derechos reservados.",
   "auditInProgress": "Auditoría en Progreso...",
+  "auditCancelled": "Auditoría cancelada por el usuario",
   "errorTitle": "Ocurrió un error",
   "error": "Error",
   "errorAction": "Iniciar Nueva Auditoría",

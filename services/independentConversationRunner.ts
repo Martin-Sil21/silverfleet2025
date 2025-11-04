@@ -13,11 +13,15 @@
 
 import type { AuditConfig, ExecutionStep } from '../types';
 import type { ConversationState, ProgressCallback } from './geminiService';
-import { generateUserMessageText, findUserMessageText, findAgentMessageText } from './geminiService';
+import { generateUserMessageText, findUserMessageText, findAgentMessageText, getGlobalIntegrationManager } from './geminiService';
 import { getRealDatabaseAuditor } from './realDatabaseAuditor';
 import { extractBotPromises, verifyBotPromises } from './intelligentDatabaseVerifier';
+import { IntegrationManager, type ToolActionVerification } from './IntegrationManager';
+import { fetchWithTimeout, retryAsync, promiseWithTimeout, isRetryableError, delay } from './apiUtils';
 
 const MAX_CONVERSATION_TURNS = 12;
+const FETCH_TIMEOUT_MS = 5 * 60 * 1000; // 🔥 5 MINUTOS para cada request al webhook (workflows complejos pueden tardar)
+const MESSAGE_GENERATION_TIMEOUT_MS = 60000; // 🔥 1 MINUTO para generar mensajes con Gemini (más contexto = más tiempo)
 
 /**
  * Ejecuta una conversación completa de manera independiente
@@ -37,6 +41,20 @@ export const runConversationIndependently = async (
     }
     console.log(`\n🎭 [${conv.testCase.title}] Iniciando conversación independiente (${convIndex + 1})...`);
     
+    // 📸 NUEVO: Tomar snapshot inicial ANTES del primer turno
+    if (config.realDatabaseConfig) {
+        const auditor = getRealDatabaseAuditor(conv.testCase.id);
+        if (auditor) {
+            try {
+                console.log(`   📸 [${conv.testCase.title}] Tomando snapshot INICIAL (antes del Turn 1)...`);
+                await auditor.takeSnapshot();
+                console.log(`   ✅ Snapshot inicial completado`);
+            } catch (error) {
+                console.error(`   ❌ Error en snapshot inicial:`, error);
+            }
+        }
+    }
+    
     for (let turnCount = 1; turnCount <= MAX_CONVERSATION_TURNS; turnCount++) {
         // 🛑 Verificar cancelación antes de cada turno
         if (abortSignal?.aborted) {
@@ -54,9 +72,128 @@ export const runConversationIndependently = async (
         console.log(`\n[${conv.testCase.title}] 📍 Turno ${turnCount}/${MAX_CONVERSATION_TURNS}`);
         
         try {
-            // 1️⃣ Generar mensaje del usuario
+            // 1️⃣ Obtener contexto de BD y herramientas (si está disponible)
+            let dbContext: string | null = null;
+            let toolsContext: string | null = null;
+            
+            if (config.realDatabaseConfig) {
+                const auditor = getRealDatabaseAuditor(conv.testCase.id);
+                if (auditor) {
+                    try {
+                        // Tomar snapshot antes de generar mensaje para tener contexto actualizado
+                        const currentSnapshot = await auditor.takeSnapshot();
+                        
+                        // 📊 Extraer información relevante de las tablas
+                        const contextLines: string[] = [];
+                        const summary = auditor.getSummary();
+                        
+                        for (const table of summary.tablesUsed) {
+                            const records = currentSnapshot.data[table] || [];
+                            if (records.length > 0) {
+                                // Buscar registro que corresponda a esta conversación
+                                const conversationRecord = records.find((r: any) => {
+                                    const sessionId = r.session_id || r.sessionId || r.session || r.id;
+                                    return sessionId && (
+                                        sessionId.includes(conv.testCase.id) ||
+                                        sessionId.includes(conv.testCase.initialPayload.telefonos) ||
+                                        sessionId.includes(conv.testCase.initialPayload.telefono) ||
+                                        sessionId.includes(conv.testCase.initialPayload.phone)
+                                    );
+                                });
+                                
+                                if (conversationRecord) {
+                                    contextLines.push(`Current Database State for "${table}":`);
+                                    
+                                    // Campos relevantes para el contexto
+                                    if (conversationRecord.is_blocked || conversationRecord.isBlocked) {
+                                        contextLines.push(`- You are BLOCKED until: ${conversationRecord.blocked_until || 'unknown'}`);
+                                        contextLines.push(`- Reason: ${conversationRecord.blocked_reason || 'Not specified'}`);
+                                    } else {
+                                        contextLines.push(`- You are NOT blocked (can continue conversation)`);
+                                    }
+                                    
+                                    if (conversationRecord.cost_usd || conversationRecord.price) {
+                                        contextLines.push(`- Current quoted price: $${conversationRecord.cost_usd || conversationRecord.price} USD`);
+                                    }
+                                    
+                                    if (conversationRecord.senia_confirmada || conversationRecord.depositConfirmed) {
+                                        contextLines.push(`- Deposit confirmed: ${conversationRecord.senia_confirmada || conversationRecord.depositConfirmed}`);
+                                    }
+                                    
+                                    if (conversationRecord.prioridad || conversationRecord.priority) {
+                                        contextLines.push(`- Priority level: ${conversationRecord.prioridad || conversationRecord.priority}`);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (contextLines.length > 0) {
+                            dbContext = contextLines.join('\n');
+                            console.log(`[${conv.testCase.title}] 📊 Contexto de BD disponible:\n${dbContext}`);
+                        }
+                        
+                        // 🔧 Detectar herramientas externas disponibles
+                        const toolsLines: string[] = [];
+                        const dependencies = auditor.dependencies;
+                        
+                        if (dependencies?.tools && dependencies.tools.length > 0) {
+                            toolsLines.push('External Tools Available:');
+                            for (const tool of dependencies.tools) {
+                                if (tool.toolType === 'email') {
+                                    toolsLines.push(`- Email system (${tool.specificType}) - can send proposals/quotes`);
+                                } else if (tool.toolType === 'calendar') {
+                                    toolsLines.push(`- Calendar (${tool.specificType}) - can schedule meetings/calls`);
+                                } else if (tool.toolType === 'crm') {
+                                    toolsLines.push(`- CRM system (${tool.specificType}) - can create leads/contacts`);
+                                } else if (tool.toolType === 'messaging') {
+                                    toolsLines.push(`- ${tool.specificType} messaging - can send notifications`);
+                                }
+                            }
+                        }
+                        
+                        if (dependencies?.subflows && dependencies.subflows.length > 0) {
+                            toolsLines.push('Available Automated Processes:');
+                            for (const subflow of dependencies.subflows) {
+                                toolsLines.push(`- ${subflow.workflowName || subflow.nodeName || 'Unnamed workflow'}`);
+                            }
+                        }
+                        
+                        if (toolsLines.length > 0) {
+                            toolsContext = toolsLines.join('\n');
+                            console.log(`[${conv.testCase.title}] 🔧 Herramientas disponibles:\n${toolsContext}`);
+                        }
+                    } catch (error) {
+                        console.warn(`[${conv.testCase.title}] ⚠️ No se pudo obtener contexto de BD:`, error);
+                    }
+                }
+            }
+            
+            // 2️⃣ Generar mensaje del usuario con contexto completo (CON TIMEOUT)
             onProgress({ message: `  [${conv.testCase.title}] ✍️ Turno ${turnCount}: Generando mensaje...` });
-            const messageText = await generateUserMessageText(conv.testCase, conv.history, language);
+            
+            const messageText = await retryAsync(
+                () => promiseWithTimeout(
+                    generateUserMessageText(
+                        conv.testCase, 
+                        conv.history, 
+                        language, 
+                        dbContext,
+                        toolsContext
+                    ),
+                    MESSAGE_GENERATION_TIMEOUT_MS,
+                    `Timeout generando mensaje para ${conv.testCase.title}`
+                ),
+                {
+                    maxRetries: 3,
+                    retryDelay: 2000,
+                    shouldRetry: isRetryableError,
+                    signal: abortSignal, // 🔥 Respeta cancelación durante retries
+                    onRetry: (attempt, error) => {
+                        console.warn(`⚠️ [${conv.testCase.title}] Reintentando generación de mensaje (intento ${attempt}/3):`, error);
+                        onProgress({ message: `  [${conv.testCase.title}] ⚠️ Reintentando generación de mensaje (intento ${attempt}/3)` });
+                    }
+                }
+            );
             
             // 2️⃣ Preparar payload
             const basePayload = { ...conv.testCase.initialPayload, conversationId: conv.testCase.id };
@@ -143,16 +280,38 @@ export const runConversationIndependently = async (
             }
             console.log(`========================================\n`);
             
-            // 5️⃣ Enviar request al webhook
+            // 5️⃣ Enviar request al webhook (CON TIMEOUT Y RETRY)
             const turnStartTime = Date.now();
             console.log(`🌐 [${conv.testCase.title}] POST ${config.endpointUrl}`);
             
-            const response = await fetch(config.endpointUrl!, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(userInput),
-                signal: abortSignal // 🛑 Pasar señal de cancelación
-            });
+            const response = await retryAsync(
+                () => fetchWithTimeout(
+                    config.endpointUrl!,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(userInput),
+                        signal: abortSignal
+                    },
+                    FETCH_TIMEOUT_MS
+                ),
+                {
+                    maxRetries: 2, // Solo 2 reintentos para no bloquear mucho
+                    retryDelay: 3000,
+                    signal: abortSignal, // 🔥 Respeta cancelación durante retries
+                    shouldRetry: (error) => {
+                        // No reintentar si es cancelación manual
+                        if (error instanceof Error && error.name === 'AbortError') {
+                            return false;
+                        }
+                        return isRetryableError(error);
+                    },
+                    onRetry: (attempt, error) => {
+                        console.warn(`⚠️ [${conv.testCase.title}] Reintentando llamada al webhook (intento ${attempt}/2):`, error);
+                        onProgress({ message: `  [${conv.testCase.title}] ⚠️ Reintentando llamada (intento ${attempt}/2)` });
+                    }
+                }
+            );
             
             const durationMs = Date.now() - turnStartTime;
             
@@ -254,6 +413,51 @@ export const runConversationIndependently = async (
                 break;
             }
             
+            // 🔥 NUEVO: Capturar IDs reales de la respuesta del webhook
+            if (config.realDatabaseConfig && responseData) {
+                const auditor = getRealDatabaseAuditor(conv.testCase.id);
+                if (auditor) {
+                    console.log(`\n🔍 [${conv.testCase.title}] Extrayendo IDs reales de respuesta del webhook...`);
+                    
+                    // Buscar campos comunes de identificadores en la respuesta
+                    const realIds: string[] = [];
+                    const fieldNames = [
+                        'sessionId', 'session_id', 'session',
+                        'conversationId', 'conversation_id', 'conversation',
+                        'chatId', 'chat_id', 'chat',
+                        'userId', 'user_id', 'user',
+                        'telefono', 'phone', 'telephone', 'tel'
+                    ];
+                    
+                    function extractFromObject(obj: any) {
+                        if (!obj || typeof obj !== 'object') return;
+                        
+                        for (const [key, value] of Object.entries(obj)) {
+                            if (fieldNames.some(f => key.toLowerCase() === f.toLowerCase())) {
+                                const strValue = String(value);
+                                if (strValue && strValue.length >= 8 && !/^TC[-_]/i.test(strValue)) {
+                                    realIds.push(strValue);
+                                    console.log(`      📌 ID real: ${key}="${strValue}"`);
+                                }
+                            }
+                            
+                            if (typeof value === 'object' && value !== null) {
+                                extractFromObject(value);
+                            }
+                        }
+                    }
+                    
+                    extractFromObject(responseData);
+                    
+                    if (realIds.length > 0) {
+                        console.log(`   ✅ Total IDs reales encontrados: ${realIds.length}`);
+                        auditor.updateSearchIdentifiers(realIds);
+                    } else {
+                        console.log(`   ℹ️ No se encontraron IDs adicionales en la respuesta`);
+                    }
+                }
+            }
+            
             // 8️⃣ Snapshot AFTER y comparar
             console.log(`\n🔍 [${conv.testCase.title}] ===== SNAPSHOT AFTER =====`);
             if (config.realDatabaseConfig) {
@@ -268,8 +472,8 @@ export const runConversationIndependently = async (
                     try {
                         // ⏱️ DELAY: Esperar a que el webhook del usuario guarde en BD
                         // Muchos webhooks guardan de forma asíncrona, necesitamos esperar
-                        await new Promise(resolve => setTimeout(resolve, 3000)); // 3 segundos
                         onProgress({ message: `    [${conv.testCase.title}] ⏱️ Esperando actualización de BD...` });
+                        await delay(3000, abortSignal); // 3 segundos - respeta cancelación
                         
                         const changesBefore = auditor.changes.length;
                         console.log(`   📸 Tomando snapshot AFTER...`);
@@ -285,7 +489,8 @@ export const runConversationIndependently = async (
                             
                             // Log detallado de snapshots para diagnóstico
                             console.log(`\n   📊 Comparación detallada:`);
-                            for (const table of auditor.config.tables) {
+                            const summary = auditor.getSummary();
+                            for (const table of summary.tablesUsed) {
                                 const beforeCount = beforeSnapshot.data[table]?.length || 0;
                                 const afterCount = afterSnapshot.data[table]?.length || 0;
                                 const diff = afterCount - beforeCount;
@@ -301,6 +506,19 @@ export const runConversationIndependently = async (
                             
                             const newChanges = auditor.changes.length - changesBefore;
                             console.log(`   📝 Nuevos cambios detectados: ${newChanges}`);
+                            
+                            // 🔧 NUEVO: Verificar herramientas (emails, etc.) después de comparar BD
+                            const latestChanges = auditor.changes.slice(-newChanges);
+                            const botResponseText = typeof responseData === 'string' 
+                                ? responseData 
+                                : JSON.stringify(responseData);
+                            
+                            await auditor.verifyToolsForTurn(
+                                turnCount,
+                                botResponseText,
+                                latestChanges,
+                                responseData
+                            );
                             
                             if (newChanges > 0) {
                                 const latestChanges = auditor.changes.slice(-newChanges);
@@ -358,7 +576,7 @@ export const runConversationIndependently = async (
                 step
             });
             
-            // 🔟 Verificación inteligente de promesas
+            // 🔟 Verificación inteligente de promesas (CON TIMEOUT)
             if (config.realDatabaseConfig) {
                 try {
                     const userMsg = findUserMessageText(step.input);
@@ -367,19 +585,84 @@ export const runConversationIndependently = async (
                         `Usuario: ${findUserMessageText(h.input)}\nBot: ${findAgentMessageText(h.output)}`
                     ).join('\n\n');
                     
-                    const promises = await extractBotPromises(botResponse, userMsg, conversationContext);
+                    // 🚀 Timeout de 45 segundos para extractBotPromises (puede ser lento con Gemini)
+                    const promises = await promiseWithTimeout(
+                        extractBotPromises(botResponse, userMsg, conversationContext, language),
+                        45000,
+                        `Timeout extrayendo promesas del bot para ${conv.testCase.title}`
+                    );
+                    
                     if (promises.length > 0) {
                         const userId = (conv.testCase.initialPayload as any).telefono || 
                                       (conv.testCase.initialPayload as any).phone || 
                                       conv.testCase.id;
-                        const newDiscrepancies = await verifyBotPromises(conv.testCase.id, promises, userId);
+                        
+                        // 🚀 Timeout de 30 segundos para verifyBotPromises
+                        const newDiscrepancies = await promiseWithTimeout(
+                            verifyBotPromises(conv.testCase.id, promises, userId),
+                            30000,
+                            `Timeout verificando promesas para ${conv.testCase.title}`
+                        );
                         
                         if (newDiscrepancies.length > 0) {
                             onProgress({ message: `    [${conv.testCase.title}] ⚠️ ${newDiscrepancies.length} discrepancia(s) en BD` });
                         }
                     }
                 } catch (error) {
-                    console.error(`[Verifier] Error:`, error);
+                    const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
+                    console.error(`[Verifier] Error:`, errorMsg);
+                    onProgress({ message: `    [${conv.testCase.title}] ⚠️ Error en verificación: ${errorMsg}` });
+                }
+            }
+            
+            // 🔗 NUEVO: Verificación de herramientas externas (Email, Calendar, etc.) CON TIMEOUT
+            const integrationManager = getGlobalIntegrationManager();
+            if (integrationManager && integrationManager.hasToolsConfigured()) {
+                try {
+                    const botResponse = findAgentMessageText(step.output);
+                    
+                    onProgress({ message: `    [${conv.testCase.title}] 🔍 Verificando herramientas...` });
+                    
+                    // 🚀 Timeout de 30 segundos para verificación de herramientas (Gmail API normalmente responde en 5-10s)
+                    const toolVerifications = await promiseWithTimeout(
+                        integrationManager.verifyAllActions(botResponse, turnCount),
+                        30000, // 🔥 30s = suficiente para Gmail API (usualmente 5-10s)
+                        `Timeout verificando herramientas para ${conv.testCase.title}`
+                    );
+                    
+                    // Guardar verificaciones en el estado de la conversación
+                    if (!conv.toolVerifications) {
+                        conv.toolVerifications = [];
+                    }
+                    conv.toolVerifications.push(...toolVerifications);
+                    
+                    // Log resultados de verificación
+                    if (toolVerifications.length > 0) {
+                        const verifiedCount = toolVerifications.filter(v => v.verified).length;
+                        const failedCount = toolVerifications.filter(v => !v.verified).length;
+                        
+                        if (failedCount > 0) {
+                            onProgress({ message: `    [${conv.testCase.title}] ❌ ${failedCount} herramienta(s) fallaron verificación` });
+                        } else {
+                            onProgress({ message: `    [${conv.testCase.title}] ✅ ${verifiedCount} herramienta(s) verificadas` });
+                        }
+                        
+                        // Log detallado por cada verificación
+                        toolVerifications.forEach(v => {
+                            const icon = v.verified ? '✅' : '❌';
+                            onProgress({ message: `      ${icon} ${v.claim.type}: ${v.message}` });
+                        });
+                    }
+                } catch (error) {
+                    const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
+                    console.error(`[IntegrationManager] Error verificando herramientas:`, errorMsg);
+                    
+                    // No fallar la auditoría por timeout de verificación - solo advertir
+                    if (errorMsg.includes('Timeout')) {
+                        onProgress({ message: `    [${conv.testCase.title}] ⚠️ Timeout verificando herramientas (APIs lentas). Continuando...` });
+                    } else {
+                        onProgress({ message: `    [${conv.testCase.title}] ⚠️ Error verificando herramientas: ${errorMsg}` });
+                    }
                 }
             }
             

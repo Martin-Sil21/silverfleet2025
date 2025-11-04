@@ -2,7 +2,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit } from './types';
 import AgentConfig from './components/AgentConfig';
 import AuditReport from './components/AuditReport';
-import ExecutiveReport from './components/ExecutiveReport';
 import { generateTestCases, runFullAudit } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
@@ -13,7 +12,6 @@ import Card from './components/Card';
 import AuditProgress from './components/AuditProgress';
 import * as historyService from './services/historyService';
 import LiveAuditView from './components/LiveAuditView';
-import CredentialsPanel from './components/CredentialsPanel';
 
 const App: React.FC = () => {
   const [auditStatus, setAuditStatus] = useState<AuditStatus>(AuditStatus.CONFIG);
@@ -30,12 +28,6 @@ const App: React.FC = () => {
   const [liveAuditData, setLiveAuditData] = useState<AuditResult[]>([]);
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
   const [isViewingHistory, setIsViewingHistory] = useState(false);
-  
-  // 🛑 AbortController para cancelar auditorías
-  const [abortController, setAbortController] = useState<AbortController | null>(null);
-  
-  // 🔐 State para panel de credenciales
-  const [showCredentialsPanel, setShowCredentialsPanel] = useState(false);
 
   useEffect(() => {
     // Save the audit automatically when it's finished and not a history view
@@ -81,18 +73,11 @@ const App: React.FC = () => {
   }, []);
 
   const handleResultComplete = useCallback((result: AuditResult) => {
-    console.log(`📊 [App.tsx] handleResultComplete llamado para: "${result.testCase.title}"`);
-    setAuditResults(prevResults => {
-      const newResults = [...prevResults, result];
-      console.log(`📊 [App.tsx] Total resultados ahora: ${newResults.length}`);
-      return newResults;
-    });
+    setAuditResults(prevResults => [...prevResults, result]);
   }, []);
 
   const handleAllComplete = useCallback(() => {
-    console.log('🏁🏁🏁 [App.tsx] handleAllComplete LLAMADO - Cambiando estado a REPORT_READY');
     setAuditStatus(AuditStatus.REPORT_READY);
-    console.log('✅ [App.tsx] Estado cambiado a REPORT_READY');
   }, []);
 
   const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => {
@@ -107,45 +92,25 @@ const App: React.FC = () => {
 
     try {
       handleProgressUpdate({ message: `🎭 Generando ${data.config.testCaseCount} personalidades de prueba...` });
+      const testCases = await generateTestCases(data.config, language);
       
-      // 🔥 NUEVO: Acumular test cases generados
-      const allTestCases: TestCase[] = [];
-      let totalGenerated = 0;
-      
-      // 🚀 Callback para mostrar cada lote a medida que se genera
-      const onBatchGenerated = (batch: TestCase[]) => {
-        allTestCases.push(...batch);
-        totalGenerated += batch.length;
-        
-        handleProgressUpdate({ message: `   ✅ ${totalGenerated}/${data.config.testCaseCount} personalidades generadas...` });
-        
-        // Mostrar las personalidades del lote
-        batch.forEach((tc, idx) => {
-          const personaText = typeof tc.persona === 'string' ? tc.persona : JSON.stringify(tc.persona);
-          const shortPersona = personaText.length > 60 ? personaText.substring(0, 60) + '...' : personaText;
-          handleProgressUpdate({ message: `      👤 "${tc.title}" - ${shortPersona}` });
-        });
-        
-        // 🔥 NUEVO: Inicializar en UI inmediatamente para auditoría real
-        if (data.config.auditType === 'real') {
-          const batchResults: AuditResult[] = batch.map(tc => ({
+      handleProgressUpdate({ message: `✅ ${testCases.length} personalidades creadas exitosamente` });
+      testCases.forEach((tc, idx) => {
+        const personaText = typeof tc.persona === 'string' ? tc.persona : JSON.stringify(tc.persona);
+        const shortPersona = personaText.length > 60 ? personaText.substring(0, 60) + '...' : personaText;
+        handleProgressUpdate({ message: `  👤 ${idx + 1}. "${tc.title}" - ${shortPersona}` });
+      });
+
+      if (data.config.auditType === 'real') {
+         const initialLiveResults: AuditResult[] = testCases.map(tc => ({
             id: tc.id,
             testCase: tc,
             executionTrace: [],
             analysis: { overallScore: 0, summary: t('auditInProgress'), criteriaBreakdown: [] },
             finalStatus: 'SUCCESS', // Temporary
-          }));
-          setLiveAuditData(prev => [...prev, ...batchResults]);
-        }
-      };
-      
-      const testCases = await generateTestCases(data.config, language, onBatchGenerated);
-      
-      handleProgressUpdate({ message: `🎉 ${testCases.length} personalidades listas! Iniciando auditoría...` });
-
-      // 🛑 Crear nuevo AbortController para esta auditoría
-      const controller = new AbortController();
-      setAbortController(controller);
+         }));
+         setLiveAuditData(initialLiveResults);
+      }
 
       await runFullAudit(
         data.config,
@@ -153,40 +118,19 @@ const App: React.FC = () => {
         handleProgressUpdate,
         handleResultComplete,
         handleAllComplete,
-        language,
-        controller // 🛑 Pasar el controller
+        language
       );
-      
-      // 🧹 Limpiar controller cuando termine
-      setAbortController(null);
-      
     } catch (error) {
       console.error("Audit failed:", error);
-      
-      // 🛑 Verificar si fue cancelación intencional
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log('✅ Auditoría cancelada correctamente');
-        setErrorMessage(t('auditCancelled') || 'Auditoría cancelada por el usuario');
-      } else {
-        const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-        const fullMessage = `${t('errorTitle')}: ${message}`;
-        setErrorMessage(fullMessage);
-      }
-      
+      const message = error instanceof Error ? error.message : 'An unknown error occurred.';
+      const fullMessage = `${t('errorTitle')}: ${message}`;
+      setErrorMessage(fullMessage);
       setAuditStatus(AuditStatus.ERROR);
-      setAbortController(null); // Limpiar controller en caso de error
     }
   }, [language, t, handleProgressUpdate, handleResultComplete, handleAllComplete]);
 
   
   const handleReset = () => {
-    // 🛑 Cancelar auditoría en progreso si existe
-    if (abortController) {
-      console.log('🛑 Cancelando auditoría en progreso...');
-      abortController.abort();
-      setAbortController(null);
-    }
-    
     setAuditStatus(AuditStatus.CONFIG);
     setAuditConfig(null);
     setAuditResults([]);
@@ -199,88 +143,6 @@ const App: React.FC = () => {
     setLiveLogs([]);
     setIsViewingHistory(false);
   };
-
-  const handleReaudit = (config: AuditConfig) => {
-    console.log('🔄 Re-auditar clicked with config:', config);
-    // Guardar la configuración actual
-    setAuditConfig(config);
-    // Limpiar resultados previos
-    setAuditResults([]);
-    setLiveAuditData([]);
-    setLiveLogs([]);
-    setProgressMessage('');
-    setErrorMessage('');
-    // Volver a estado de configuración (para poder ver/editar antes de re-ejecutar)
-    setAuditStatus(AuditStatus.CONFIG);
-    setIsViewingHistory(false);
-  };
-
-  const handleRepeatAudit = useCallback(async (config: AuditConfig) => {
-    console.log('🔁 Repetir auditoría con configuración exacta:', config);
-    
-    // Extraer testCases de los resultados anteriores
-    const previousTestCases = auditResults.map(r => r.testCase);
-    console.log(`🔁 Reutilizando ${previousTestCases.length} casos de prueba anteriores`);
-    
-    // Limpiar resultados previos
-    setAuditResults([]);
-    setLiveAuditData([]);
-    setLiveLogs([]);
-    setProgressMessage('');
-    setErrorMessage('');
-    setCurrentTrace(null);
-    setIsViewingHistory(false);
-    
-    // Guardar config y cambiar a estado AUDITING
-    setAuditConfig(config);
-    setAuditStatus(AuditStatus.AUDITING);
-    
-    // Crear nuevo AbortController
-    const newAbortController = new AbortController();
-    setAbortController(newAbortController);
-    
-    try {
-      console.log('🚀 Iniciando auditoría repetida...');
-      handleProgressUpdate({ message: `🔁 Repitiendo auditoría con ${previousTestCases.length} casos anteriores...` });
-      
-      // Inicializar UI para auditoría real
-      if (config.auditType === 'real') {
-        const initialResults: AuditResult[] = previousTestCases.map(tc => ({
-          id: tc.id,
-          testCase: tc,
-          executionTrace: [],
-          analysis: {} as any,
-          finalStatus: 'SUCCESS' as const,
-          startTime: Date.now()
-        }));
-        setLiveAuditData(initialResults);
-      }
-      
-      // Ejecutar auditoría completa con mismos test cases
-      await runFullAudit(
-        config,
-        previousTestCases,
-        handleProgressUpdate,
-        handleResultComplete,
-        handleAllComplete,
-        language,
-        newAbortController
-      );
-      
-      console.log('✅ Auditoría repetida completada');
-    } catch (error: any) {
-      console.error('❌ Error en auditoría repetida:', error);
-      if (error.name === 'AbortError') {
-        console.log('🛑 Auditoría repetida cancelada por el usuario');
-        setErrorMessage(t('auditCancelled') || 'Auditoría cancelada');
-      } else {
-        setErrorMessage(error.message || 'Error desconocido');
-      }
-      setAuditStatus(AuditStatus.ERROR);
-    } finally {
-      setAbortController(null);
-    }
-  }, [auditResults, handleProgressUpdate, handleResultComplete, handleAllComplete, language, t]);
 
   const handleViewHistory = (item: HistoricalAudit) => {
     setAuditConfig(item.config);
@@ -311,7 +173,6 @@ const App: React.FC = () => {
               onCancel={handleReset} 
               totalCases={auditConfig.testCaseCount}
               completedCases={auditResults.length}
-              config={auditConfig}
           />
         }
         // Fallback for visual audit without n8n data
@@ -323,7 +184,7 @@ const App: React.FC = () => {
         />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
-        return <ExecutiveReport results={auditResults} config={auditConfig} onReset={handleReset} onReaudit={handleReaudit} onRepeatAudit={handleRepeatAudit} />;
+        return <AuditReport results={auditResults} onReset={handleReset} config={auditConfig} isHistoryView={isViewingHistory} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !auditResults.length || !auditConfig) {
             return (
@@ -354,7 +215,7 @@ const App: React.FC = () => {
         );
       case AuditStatus.CONFIG:
       default:
-        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} onManageCredentials={() => setShowCredentialsPanel(true)} initialConfig={auditConfig} />;
+        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} />;
     }
   };
   
@@ -368,11 +229,6 @@ const App: React.FC = () => {
   
   if (auditStatus === AuditStatus.AUDITING && auditConfig?.auditType === 'real') {
     return renderContent();
-  }
-  
-  // 🔐 Panel de credenciales
-  if (showCredentialsPanel) {
-    return <CredentialsPanel onClose={() => setShowCredentialsPanel(false)} />;
   }
 
   return (

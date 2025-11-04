@@ -3,9 +3,6 @@ import type { DatabaseOperationSummary, DatabaseChange } from '../types';
 import { analyzeAndMapDatabase, type FieldMappings } from './databaseSchemaAnalyzer';
 import { analyzeWorkflowDatabases, findMappingForTable, getFilterValue } from './workflowDatabaseAnalyzer';
 import type { WorkflowDatabaseInfo } from './workflowDatabaseAnalyzer';
-import { verifyTools, type ToolVerificationResult } from './toolVerificator';
-import { DetectedTool, DetectedSubflow } from './workflowDependencyAnalyzer';
-import snapshotCache from './snapshotCache'; // 🔥 NUEVO: Caché de snapshots
 
 /**
  * Sistema de Auditoría de Base de Datos REAL
@@ -76,103 +73,22 @@ class RealDatabaseAuditor {
   private mappingsInitialized: boolean = false;
   private workflowInfo: WorkflowDatabaseInfo | null = null; // 🔥 INFO del workflow
   private payload: Record<string, any> | undefined; // 🔥 Payload original
-  
-  // 🔧 NUEVO: Almacenar herramientas detectadas del workflow para verificación
-  public detectedTools: DetectedTool[] = [];
-  public detectedSubflows: DetectedSubflow[] = [];
-  public toolVerifications: ToolVerificationResult[] = []; // Público para reporting
-  
-  // 🔥 Accessor para dependencias (tools + subflows)
-  public get dependencies() {
-    return {
-      tools: this.detectedTools,
-      subflows: this.detectedSubflows
-    };
-  }
 
-  constructor(
-    conversationId: string, 
-    config: DatabaseConfig, 
-    payload?: Record<string, any>, 
-    workflowNodes?: any[],
-    detectedTools?: DetectedTool[],
-    detectedSubflows?: DetectedSubflow[]
-  ) {
+  constructor(conversationId: string, config: DatabaseConfig, payload?: Record<string, any>, workflowNodes?: any[]) {
     this.conversationId = conversationId;
     this.config = config;
     this.payload = payload;
-    this.detectedTools = detectedTools || [];
-    this.detectedSubflows = detectedSubflows || [];
-    
-    // 🔥 DEBUG: Ver qué nos llega
-    console.log(`\n🔥 [Constructor RealDatabaseAuditor]`);
-    console.log(`   conversationId: ${conversationId}`);
-    console.log(`   workflowNodes recibido: ${workflowNodes ? `array de ${workflowNodes.length} elementos` : 'undefined/null'}`);
-    if (workflowNodes && workflowNodes.length > 0) {
-      console.log(`   Primer nodo:`, JSON.stringify(workflowNodes[0]).substring(0, 200));
-    }
     
     // 🔥 ANALIZAR EL WORKFLOW para obtener mappings de tablas → campos de filtro
     if (workflowNodes && workflowNodes.length > 0) {
       console.log(`\n🔍 [DB Audit] Analizando workflow para detectar uso de BD...`);
       this.workflowInfo = analyzeWorkflowDatabases(workflowNodes);
-      
-      // 🔥 DEBUG: Mostrar lo que se detectó
-      if (this.workflowInfo) {
-        console.log(`\n📊 [DB Audit] RESULTADO DEL ANÁLISIS DEL WORKFLOW:`);
-        console.log(`   Tablas detectadas: ${this.workflowInfo.tables.join(', ')}`);
-        console.log(`   Total mappings: ${this.workflowInfo.mappings.length}`);
-        
-        if (this.workflowInfo.mappings.length > 0) {
-          console.log(`\n   📋 MAPPINGS DETECTADOS:`);
-          this.workflowInfo.mappings.forEach((m, idx) => {
-            console.log(`      ${idx + 1}. Tabla: "${m.table}"`);
-            console.log(`         - Campo filtro: ${m.filterField}`);
-            console.log(`         - Campo payload: ${m.sourceField}`);
-          });
-        } else {
-          console.warn(`   ⚠️ NO SE DETECTARON MAPPINGS - Se usará auto-detect`);
-        }
-      } else {
-        console.error(`   ❌ analyzeWorkflowDatabases devolvió null/undefined`);
-      }
     } else {
       console.log(`\n⚠️ [DB Audit] No se proporcionó información del workflow, usando detección automática`);
     }
     
     // 🔍 Extraer TODOS los posibles identificadores del payload (INTELIGENTE)
-    // Evitar agregar IDs internos de test (ej: TC-001) que no existen en la BD
-    // Sólo agregar si el conversationId parece un identificador real (teléfono, uuid, etc.)
-    const isLikelyExternalId = (id: string) => {
-      if (!id || typeof id !== 'string') return false;
-      
-      // ❌ Excluir test IDs completamente
-      if (/^TC[-_]/i.test(id)) return false;
-      
-      // ❌ Excluir IDs muy cortos (probablemente internos)
-      if (id.length < 8) return false;
-      
-      // ✅ Incluir teléfonos con prefijo internacional
-      if (id.includes('+') && /\d{8,}/.test(id)) return true;
-      
-      // ✅ Incluir IDs que empiezan con prefijos conocidos
-      if (id.startsWith('conv_') || id.startsWith('session_') || id.startsWith('chat_') || id.startsWith('user_')) return true;
-      
-      // ✅ Incluir UUIDs
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return true;
-      
-      // ✅ Incluir timestamps largos (13+ dígitos)
-      if (/^\d{13,}$/.test(id)) return true;
-      
-      return false;
-    };
-
-    if (isLikelyExternalId(conversationId)) {
-      this.searchIdentifiers.push(conversationId);
-      console.log(`   📌 Identificador base agregado: ${conversationId}`);
-    } else {
-      console.log(`   ⏭️ Identificador base ignorado (no es ID real): ${conversationId}`);
-    }
+    this.searchIdentifiers.push(conversationId);
     
     if (payload) {
       console.log(`\n🔍 [DB Audit] Analizando payload para extraer identificadores...`);
@@ -191,12 +107,9 @@ class RealDatabaseAuditor {
       for (const field of priorityFields) {
         if (payload[field]) {
           const value = String(payload[field]);
-          // 🔥 VALIDAR que sea un ID real (no test ID, no muy corto)
-          if (isLikelyExternalId(value) && !this.searchIdentifiers.includes(value)) {
+          if (!this.searchIdentifiers.includes(value)) {
             this.searchIdentifiers.push(value);
             console.log(`   ✅ Identificador (prioritario): ${field}="${value}"`);
-          } else if (!isLikelyExternalId(value)) {
-            console.log(`   ⏭️ Campo prioritario ignorado: ${field}="${value}" (no es ID válido)`);
           }
         }
       }
@@ -220,8 +133,7 @@ class RealDatabaseAuditor {
           !key.toLowerCase().includes('content') && // No es contenido
           !key.toLowerCase().includes('body') && // No es body
           !key.toLowerCase().includes('prompt') && // No es prompt
-          !key.toLowerCase().includes('query') && // No es query
-          isLikelyExternalId(valueStr) // 🔥 VALIDAR con la función estricta
+          !key.toLowerCase().includes('query') // No es query
         );
         
         if (looksLikeId && !this.searchIdentifiers.includes(valueStr)) {
@@ -235,91 +147,6 @@ class RealDatabaseAuditor {
     console.log(`   📋 Lista completa:`, this.searchIdentifiers);
     console.log(`   ✅ Estos valores se buscarán en las tablas de BD\n`);
     this.initializeClient();
-  }
-  
-  /**
-   * 🔥 NUEVO: Actualiza los identificadores de búsqueda con valores reales
-   * Útil para agregar IDs generados durante la ejecución del workflow
-   * @param newIdentifiers Array de nuevos identificadores (sessionId, conversationId, etc.)
-   */
-  public updateSearchIdentifiers(newIdentifiers: string[]): void {
-    console.log(`\n🔄 [DB Audit] Actualizando identificadores de búsqueda...`);
-    console.log(`   Identificadores actuales: [${this.searchIdentifiers.join(', ')}]`);
-    console.log(`   Nuevos identificadores recibidos: [${newIdentifiers.join(', ')}]`);
-    
-    let added = 0;
-    const isLikelyExternalId = (id: string) => {
-      if (!id || typeof id !== 'string') return false;
-      if (/^TC[-_]/i.test(id)) return false;
-      if (id.length < 8) return false;
-      if (id.includes('+') && /\d{8,}/.test(id)) return true;
-      if (id.startsWith('conv_') || id.startsWith('session_') || id.startsWith('chat_') || id.startsWith('user_')) return true;
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return true;
-      if (/^\d{13,}$/.test(id)) return true;
-      return false;
-    };
-    
-    for (const id of newIdentifiers) {
-      if (id && !this.searchIdentifiers.includes(id)) {
-        // Validar que sea un ID real (no test ID)
-        if (isLikelyExternalId(id)) {
-          this.searchIdentifiers.push(id);
-          added++;
-          console.log(`      ✅ Agregado: ${id}`);
-        } else {
-          console.log(`      ⏭️ Ignorado (no es ID válido): ${id}`);
-        }
-      }
-    }
-    
-    console.log(`   Total agregados: ${added}`);
-    console.log(`   Total identificadores ahora: ${this.searchIdentifiers.length}`);
-    console.log(`   📋 Lista actualizada: [${this.searchIdentifiers.join(', ')}]\n`);
-  }
-  
-  /**
-   * 🔥 NUEVO: Extrae IDs reales de la respuesta del webhook
-   * Busca campos como sessionId, conversationId, chatId, etc.
-   * @param webhookResponse Respuesta del webhook (puede ser anidada)
-   * @returns Array de identificadores encontrados
-   */
-  public static extractRealIdentifiers(webhookResponse: any): string[] {
-    const identifiers: string[] = [];
-    
-    const fieldNames = [
-      'sessionId', 'session_id', 'session',
-      'conversationId', 'conversation_id', 'conversation',
-      'chatId', 'chat_id', 'chat',
-      'userId', 'user_id', 'user',
-      'telefono', 'phone', 'telephone', 'tel'
-    ];
-    
-    function extractFromObject(obj: any, path: string = '') {
-      if (!obj || typeof obj !== 'object') return;
-      
-      for (const [key, value] of Object.entries(obj)) {
-        const fullPath = path ? `${path}.${key}` : key;
-        
-        // Si el campo está en la lista de nombres comunes
-        if (fieldNames.some(f => key.toLowerCase() === f.toLowerCase())) {
-          const strValue = String(value);
-          if (strValue && strValue.length >= 8 && !/^TC[-_]/i.test(strValue)) {
-            identifiers.push(strValue);
-            console.log(`   📌 ID real encontrado en webhook: ${key}="${strValue}"`);
-          }
-        }
-        
-        // Recursivo para objetos anidados
-        if (typeof value === 'object' && value !== null) {
-          extractFromObject(value, fullPath);
-        }
-      }
-    }
-    
-    extractFromObject(webhookResponse);
-    
-    // Eliminar duplicados
-    return Array.from(new Set(identifiers));
   }
   
   /**
@@ -390,11 +217,7 @@ class RealDatabaseAuditor {
       try {
         console.log(`\n   🔍 [${table}] Consultando...`);
         const startTime = Date.now();
-        
-        // 🔥 USAR CACHÉ para evitar consultas duplicadas cuando múltiples conversaciones consultan al mismo tiempo
-        const cacheKey = `${table}_${this.conversationId}_${Math.floor(timestamp / 2000)}`; // Cache por 2 segundos
-        const rows = await snapshotCache.getOrFetch(cacheKey, () => this.queryTable(table));
-        
+        const rows = await this.queryTable(table);
         const duration = Date.now() - startTime;
         
         data[table] = rows;
@@ -446,14 +269,8 @@ class RealDatabaseAuditor {
       case 'supabase':
         try {
           // 🔥 ESTRATEGIA 1: Usar información del WORKFLOW (si está disponible)
-          console.log(`\n   🔍 [${table}] Iniciando consulta...`);
-          console.log(`      workflowInfo existe: ${!!this.workflowInfo}`);
-          console.log(`      payload existe: ${!!this.payload}`);
-          
           if (this.workflowInfo && this.payload) {
-            console.log(`      Buscando mapping para tabla: ${table}`);
-            const mapping = findMappingForTable(table, this.workflowInfo, this.payload);
-            console.log(`      Mapping encontrado: ${!!mapping}`);
+            const mapping = findMappingForTable(table, this.workflowInfo);
             
             if (mapping) {
               console.log(`\n   🎯 [${table}] USANDO MAPPING DEL WORKFLOW`);
@@ -461,48 +278,15 @@ class RealDatabaseAuditor {
               console.log(`      Campo del payload: ${mapping.sourceField}`);
               
               const filterValue = getFilterValue(mapping, this.payload);
-              console.log(`      Valor extraído: ${filterValue}`);
               
               if (filterValue) {
                 console.log(`      Valor a filtrar: "${filterValue}"`);
-                console.log(`      Operador: ${mapping.operator || 'eq'}`);
                 
                 try {
-                  let query = this.client.from(table).select('*');
-                  
-                  // Aplicar operador correcto según el workflow
-                  const operator = mapping.operator || 'eq';
-                  switch (operator) {
-                    case 'eq':
-                      query = query.eq(mapping.filterField, filterValue);
-                      break;
-                    case 'ilike':
-                      query = query.ilike(mapping.filterField, `%${filterValue}%`);
-                      break;
-                    case 'like':
-                      query = query.like(mapping.filterField, `%${filterValue}%`);
-                      break;
-                    case 'gt':
-                      query = query.gt(mapping.filterField, filterValue);
-                      break;
-                    case 'lt':
-                      query = query.lt(mapping.filterField, filterValue);
-                      break;
-                    case 'gte':
-                      query = query.gte(mapping.filterField, filterValue);
-                      break;
-                    case 'lte':
-                      query = query.lte(mapping.filterField, filterValue);
-                      break;
-                    case 'neq':
-                      query = query.neq(mapping.filterField, filterValue);
-                      break;
-                    default:
-                      // Fallback a eq si es operador desconocido
-                      query = query.eq(mapping.filterField, filterValue);
-                  }
-                  
-                  const { data, error } = await query
+                  const { data, error } = await this.client
+                    .from(table)
+                    .select('*')
+                    .eq(mapping.filterField, filterValue)
                     .order('created_at', { ascending: false, nullsFirst: false })
                     .limit(150);
                   
@@ -517,17 +301,11 @@ class RealDatabaseAuditor {
                 }
               } else {
                 console.log(`      ⚠️ No se encontró el valor de "${mapping.sourceField}" en el payload`);
-                console.log(`      Payload disponible:`, Object.keys(this.payload));
               }
-            } else {
-              console.log(`      ⚠️ No se encontró mapping para tabla "${table}"`);
             }
-          } else {
-            if (!this.workflowInfo) console.log(`      ⚠️ No hay workflowInfo`);
-            if (!this.payload) console.log(`      ⚠️ No hay payload`);
           }
           
-          // 🔄 Si llegamos aquí: no hay mapping O el mapping falló
+          // � Si llegamos aquí: no hay mapping O el mapping falló
           console.log(`\n   🔍 [${table}] Usando detección automática por estructura...`);
           return await this.queryTableWithAutoDetect(table);
           
@@ -535,16 +313,12 @@ class RealDatabaseAuditor {
           console.error(`   ✗ Error general en queryTable para ${table}:`, error);
           return [];
         }
-        
-      default:
-        return [];
-    }
-  }
-  
-  /**
-   * Método privado que realiza auto-detección de campos cuando no hay mapping del workflow
-   */
-  private async queryTableWithAutoDetect(table: string): Promise<any[]> {
+      }
+    
+    /**
+     * Método privado que realiza auto-detección de campos cuando no hay mapping del workflow
+     */
+    private async queryTableWithAutoDetect(table: string): Promise<any[]> {
       try {
         const { data: sampleData, error: sampleError } = await this.client
           .from(table)
@@ -572,26 +346,8 @@ class RealDatabaseAuditor {
           let filterField: string | undefined;
           let filterValue: string | undefined;
           
-          // 🔥 PRIORIZAR CAMPOS CONOCIDOS DE SESIÓN (session_id, sessionId, etc.)
-          const priorityFields = [
-            'session_id', 'sessionId', 'session',
-            'conversationId', 'conversation_id',
-            'chatId', 'chat_id',
-            'telefono', 'telefonos', 'phone'
-          ];
-          
           // PASO 1: Intentar encontrar coincidencia directa consultando la tabla
-          // 🔥 SOLO en campos prioritarios (evita buscar en is_blocked, created_at, etc.)
-          const fieldsToCheck = availableFields.filter(f => 
-            priorityFields.some(pf => f.toLowerCase().includes(pf.toLowerCase()))
-          );
-          
-          console.log(`   🎯 Campos de sesión detectados: ${fieldsToCheck.join(', ') || 'ninguno, usando todos'}`);
-          const searchFields = fieldsToCheck.length > 0 ? fieldsToCheck : priorityFields.filter(f => availableFields.includes(f));
-          
-          for (const field of searchFields) {
-            if (!availableFields.includes(field)) continue;
-            
+          for (const field of availableFields) {
             // Buscar si alguno de nuestros identificadores está en esta columna
             for (const identifier of this.searchIdentifiers) {
               try {
@@ -692,16 +448,20 @@ class RealDatabaseAuditor {
           return catalogData || [];
           
         } catch (err) {
-        console.error(`   ✗ Error específico en ${table}:`, err);
-        // Fallback: traer todo limitado
-        const { data, error } = await this.client
-          .from(table)
-          .select('*')
-          .limit(100);
-        
-        if (error) throw error;
-        return data || [];
-      }
+          console.error(`   ✗ Error específico en ${table}:`, err);
+          // Fallback: traer todo limitado
+          const { data, error } = await this.client
+            .from(table)
+            .select('*')
+            .limit(100);
+          
+          if (error) throw error;
+          return data || [];
+        }
+      
+      default:
+        return [];
+    }
   }
 
   /**
@@ -1017,30 +777,9 @@ class RealDatabaseAuditor {
       console.log(`      🔄 UPDATES detectados: ${updates.length}`);
       
       // 3. DELETES: Registros eliminados
-      // Evitar falsos positivos: marcar DELETE sólo si el registro pertenece a una sesión
-      // relevante (ej. tiene session_id/telefono que esté en searchIdentifiers).
-      const deletedRecords = beforeData.filter(beforeRec => {
-        const stillExists = afterData.some(afterRec => this.getRecordId(afterRec) === this.getRecordId(beforeRec));
-        if (stillExists) return false;
-
-        // Extraer posible campo de sesión del registro
-        const sessionCandidates = [
-          beforeRec.session_id, beforeRec.sessionId, beforeRec.session, beforeRec.phone, beforeRec.telefono
-        ].filter(Boolean).map(String);
-
-        // Si no hay candidato de sesión, no asumimos DELETE (podría ser fuera del top-N)
-        if (sessionCandidates.length === 0) return false;
-
-        // Si alguno de los sessionCandidates aparece en nuestros identificadores, consideramos DELETE
-        for (const val of sessionCandidates) {
-          if (this.searchIdentifiers.includes(val)) return true;
-          // Normalizar números con y sin '+' para comparar
-          const normalized = val.replace(/\D/g, '');
-          if (normalized && this.searchIdentifiers.some(id => id.replace(/\D/g, '') === normalized)) return true;
-        }
-
-        return false;
-      });
+      const deletedRecords = beforeData.filter(
+        beforeRec => !afterData.some(afterRec => this.getRecordId(afterRec) === this.getRecordId(beforeRec))
+      );
       
       console.log(`      ➖ DELETES detectados: ${deletedRecords.length}`);
       deletedRecords.forEach(record => {
@@ -1060,70 +799,9 @@ class RealDatabaseAuditor {
   }
 
   /**
-   * 🔧 Verifica que las herramientas externas fueron ejecutadas
-   * Debe llamarse DESPUÉS de cada turno con la respuesta del agente
-   */
-  async verifyToolsForTurn(
-    turnNumber: number,
-    agentResponse: string,
-    dbChangesThisTurn: DatabaseChange[],
-    responsePayload?: any
-  ): Promise<void> {
-    console.log(`\n🔧 [Tool Verificator] Verificando herramientas para Turno ${turnNumber}`);
-    console.log(`   Herramientas detectadas en auditor: ${this.detectedTools.length}`);
-    console.log(`   Subflows detectados en auditor: ${this.detectedSubflows.length}`);
-    
-    if (this.detectedTools.length === 0 && this.detectedSubflows.length === 0) {
-      console.log(`   ⚠️ ALERTA: No hay herramientas ni subflows en este auditor`);
-      console.log(`   Conversation ID: ${this.conversationId}`);
-      console.log(`   Esto significa que las herramientas no se pasaron correctamente al constructor`);
-    } else {
-      console.log(`   📋 Herramientas disponibles para verificar:`);
-      this.detectedTools.forEach((tool, idx) => {
-        console.log(`      ${idx + 1}. ${tool.nodeName} (${tool.toolType})`);
-      });
-      if (this.detectedSubflows.length > 0) {
-        console.log(`   📋 Subflows disponibles:`);
-        this.detectedSubflows.forEach((sf, idx) => {
-          console.log(`      ${idx + 1}. ${sf.nodeName || sf.workflowName || 'Unnamed'}`);
-        });
-      }
-    }
-    
-    try {
-      const verification = await verifyTools(
-        this.conversationId,
-        turnNumber,
-        agentResponse,
-        this.detectedTools,
-        this.detectedSubflows,
-        dbChangesThisTurn,
-        responsePayload
-      );
-      
-      this.toolVerifications.push(verification);
-      
-      console.log(`   ${verification.summary}`);
-      if (verification.verifications.length > 0) {
-        console.log(`   Verificaciones realizadas:`);
-        verification.verifications.forEach(v => {
-          const icon = v.verdict === 'VERIFIED' ? '✅' : '❌';
-          console.log(`      ${icon} ${v.toolName}: ${v.details}`);
-        });
-      }
-    } catch (error) {
-      console.error(`   ❌ Error al verificar herramientas:`, error);
-    }
-  }
-
-  /**
    * Obtiene el resumen de la auditoría
    */
-  getSummary(): DatabaseOperationSummary & { 
-    discrepancies: DatabaseDiscrepancy[], 
-    changes: DatabaseChange[],
-    toolVerifications?: any[] // 🔧 NUEVO: Verificaciones de herramientas
-  } {
+  getSummary(): DatabaseOperationSummary & { discrepancies: DatabaseDiscrepancy[], changes: DatabaseChange[] } {
     const criticalIssues = this.discrepancies.filter(d => d.severity === 'critical').length;
     const warnings = this.discrepancies.filter(d => d.severity === 'warning').length;
     
@@ -1147,7 +825,6 @@ class RealDatabaseAuditor {
     console.log(`   Discrepancias: ${this.discrepancies.length}`);
     console.log(`   - Críticas: ${criticalIssues}`);
     console.log(`   - Advertencias: ${warnings}`);
-    console.log(`   🔧 Verificaciones de herramientas: ${this.toolVerifications.length}`);
     
     return {
       totalOperations: totalOperations, // 🔥 Total real: lecturas + cambios
@@ -1159,8 +836,7 @@ class RealDatabaseAuditor {
       recordsCreated: inserts,
       operations: [],
       discrepancies: this.discrepancies,
-      changes: this.changes,
-      toolVerifications: this.toolVerifications // 🔧 NUEVO
+      changes: this.changes
     };
   }
 
@@ -1180,9 +856,7 @@ export const initializeRealDatabaseAuditor = (
   conversationId: string,
   config: DatabaseConfig,
   payload?: Record<string, any>,
-  workflowNodes?: any[], // 🔥 Nodos del workflow para análisis inteligente
-  detectedTools?: DetectedTool[],
-  detectedSubflows?: DetectedSubflow[]
+  workflowNodes?: any[] // 🔥 NUEVO: Nodos del workflow para análisis inteligente
 ): RealDatabaseAuditor => {
   console.log(`\n🗄️ ===== INICIALIZANDO AUDITOR DE BD =====`);
   console.log(`   Conversación: ${conversationId}`);
@@ -1191,17 +865,8 @@ export const initializeRealDatabaseAuditor = (
   console.log(`   Tablas a monitorear: ${config.tables.join(', ')}`);
   console.log(`   Identificadores extraídos del payload:`, payload ? Object.keys(payload).slice(0, 5).join(', ') : 'ninguno');
   console.log(`   Nodos del workflow: ${workflowNodes ? workflowNodes.length : 'no proporcionados'}`);
-  console.log(`   Herramientas detectadas: ${detectedTools?.length || 0}`);
-  console.log(`   Subflows detectados: ${detectedSubflows?.length || 0}`);
   
-  const auditor = new RealDatabaseAuditor(
-    conversationId, 
-    config, 
-    payload, 
-    workflowNodes, 
-    detectedTools, 
-    detectedSubflows
-  );
+  const auditor = new RealDatabaseAuditor(conversationId, config, payload, workflowNodes);
   auditorRegistry.set(conversationId, auditor);
   
   console.log(`   ✅ Auditor registrado y listo`);

@@ -522,31 +522,73 @@ const LiveAuditView: React.FC<LiveAuditViewProps> = ({ results, logs, onCancel, 
                     </div>
                 </div>
 
-                {/* 🔥 NUEVO: Indicador de auditoría de BD activa */}
-                {isDatabaseActive && (
-                    <div className="mt-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 border-2 border-indigo-300 dark:border-indigo-700 rounded-lg">
-                        <div className="flex items-center gap-3">
-                            <div className="relative">
-                                <div className="w-3 h-3 bg-indigo-500 rounded-full animate-pulse"></div>
-                                <div className="absolute inset-0 w-3 h-3 bg-indigo-500 rounded-full animate-ping opacity-75"></div>
-                            </div>
-                            <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-lg">🗄️</span>
-                                    <span className="font-semibold text-indigo-800 dark:text-indigo-200 text-sm">
-                                        Auditoría de Base de Datos Activa
-                                    </span>
+                {/* 🔥 Indicadores de auditoría activa */}
+                <div className="mt-3 space-y-2">
+                    {/* Auditoría de BD */}
+                    {isDatabaseActive && (
+                        <div className="p-3 bg-indigo-50 dark:bg-indigo-900/20 border-2 border-indigo-300 dark:border-indigo-700 rounded-lg">
+                            <div className="flex items-center gap-3">
+                                <div className="relative">
+                                    <div className="w-3 h-3 bg-indigo-500 rounded-full animate-pulse"></div>
+                                    <div className="absolute inset-0 w-3 h-3 bg-indigo-500 rounded-full animate-ping opacity-75"></div>
                                 </div>
-                                <p className="text-xs text-indigo-600 dark:text-indigo-300 mt-0.5">
-                                    Monitoreando {config.realDatabaseConfig.tables.length} tabla(s): {config.realDatabaseConfig.tables.join(', ')}
-                                </p>
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-lg">🗄️</span>
+                                        <span className="font-semibold text-indigo-800 dark:text-indigo-200 text-sm">
+                                            Auditoría de Base de Datos Activa
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-indigo-600 dark:text-indigo-300 mt-0.5">
+                                        Monitoreando {config.realDatabaseConfig.tables.length} tabla(s): {config.realDatabaseConfig.tables.join(', ')}
+                                    </p>
+                                </div>
+                                <span className="text-xs font-mono bg-indigo-200 dark:bg-indigo-800 text-indigo-800 dark:text-indigo-200 px-2 py-1 rounded">
+                                    {config.realDatabaseConfig.type.toUpperCase()}
+                                </span>
                             </div>
-                            <span className="text-xs font-mono bg-indigo-200 dark:bg-indigo-800 text-indigo-800 dark:text-indigo-200 px-2 py-1 rounded">
-                                {config.realDatabaseConfig.type.toUpperCase()}
-                            </span>
                         </div>
-                    </div>
-                )}
+                    )}
+
+                    {/* Herramientas detectadas */}
+                    {selectedResult && selectedResult.databaseActivity && (selectedResult.databaseActivity as any).intelligentVerification && (
+                        <div className="p-3 bg-orange-50 dark:bg-orange-900/20 border-2 border-orange-300 dark:border-orange-700 rounded-lg">
+                            <div className="flex items-center gap-3">
+                                <div className="relative">
+                                    <div className="w-3 h-3 bg-orange-500 rounded-full animate-pulse"></div>
+                                    <div className="absolute inset-0 w-3 h-3 bg-orange-500 rounded-full animate-ping opacity-75"></div>
+                                </div>
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-lg">🔧</span>
+                                        <span className="font-semibold text-orange-800 dark:text-orange-200 text-sm">
+                                            Verificación de Herramientas Activa
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-orange-600 dark:text-orange-300 mt-0.5">
+                                        {(() => {
+                                            const verification = (selectedResult.databaseActivity as any).intelligentVerification;
+                                            const discrepancyCount = verification.discrepancies?.length || 0;
+                                            const score = verification.overallScore?.toFixed(1) || 'N/A';
+                                            return discrepancyCount > 0 
+                                                ? `${discrepancyCount} discrepancia(s) detectada(s) - Score: ${score}/10`
+                                                : `✅ Sin discrepancias - Score: ${score}/10`;
+                                        })()}
+                                    </p>
+                                </div>
+                                <span className={`text-xs font-mono px-2 py-1 rounded ${
+                                    ((selectedResult.databaseActivity as any).intelligentVerification.overallScore || 0) >= 8
+                                        ? 'bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200'
+                                        : ((selectedResult.databaseActivity as any).intelligentVerification.overallScore || 0) >= 5
+                                        ? 'bg-yellow-200 dark:bg-yellow-800 text-yellow-800 dark:text-yellow-200'
+                                        : 'bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200'
+                                }`}>
+                                    {((selectedResult.databaseActivity as any).intelligentVerification.overallScore || 0).toFixed(1)}/10
+                                </span>
+                            </div>
+                        </div>
+                    )}
+                </div>
             </header>
 
             <div className="flex-grow flex relative overflow-hidden">

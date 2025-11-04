@@ -105,13 +105,20 @@ export const extractBotPromises = async (
   `;
 
   try {
-    const response = await ai.models.generateContent({
+    // 🚀 Agregar timeout de 30 segundos para extractBotPromises
+    const geminiPromise = ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         responseMimeType: "application/json",
       },
     });
+    
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Timeout: extractBotPromises excedió 30s')), 30000)
+    );
+    
+    const response = await Promise.race([geminiPromise, timeoutPromise]) as any;
     
     const promises = JSON.parse(response.text.trim());
     console.log(`[Verifier] Extraídas ${promises.length} promesas del bot:`, promises);

@@ -4,6 +4,7 @@ import type { AuditResult, CriterionAnalysis, AuditConfig, ExecutionStep } from 
 import Card from './Card';
 import { useTranslation } from '../hooks/useTranslation';
 import DashboardReport from './DashboardReport';
+import { generateDiscrepanciesReport } from '../services/intelligentToolVerificator';
 
 interface AuditReportProps {
   results: AuditResult[];
@@ -150,9 +151,14 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ result, config }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isTraceVisible, setIsTraceVisible] = useState(false);
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const traceTitle = config.auditType === 'real' ? t('showConversationLog') : t('showNodeLog');
   const hideTraceTitle = config.auditType === 'real' ? t('hideConversationLog') : t('hideNodeLog');
+  function getScoreColor(score: number): string {
+    if (score >= 8) return 'text-green-600 dark:text-green-400';
+    if (score >= 5) return 'text-yellow-600 dark:text-yellow-400';
+    return 'text-red-600 dark:text-red-400';
+  }
 
   return (
     <Card className="mb-6">
@@ -192,37 +198,194 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
         </div>
       </div>
       {isExpanded && (
-        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 animate-fade-in">
-          <div className="flex items-start justify-between mb-3">
-            <div className="flex-1">
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t('personaLabel')}: {result.testCase.persona}</p>
-              <p className="text-gray-700 dark:text-gray-300">{result.analysis.summary}</p>
+        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 animate-fade-in space-y-6">
+          
+          {/* ============================================ */}
+          {/* 📊 SECCIÓN 1: RESUMEN GENERAL */}
+          {/* ============================================ */}
+          <section className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-5 border-2 border-blue-300 dark:border-blue-700">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">📊</span>
+              <h3 className="text-2xl font-bold text-blue-900 dark:text-blue-100">
+                Resumen General de la Auditoría
+              </h3>
             </div>
             
-            {/* ⏱️ Timing detallado */}
-            {(result.startTime || result.durationMs) && (
-              <div className="ml-4 text-xs text-gray-500 dark:text-gray-400 text-right">
-                {result.startTime && (
-                  <p>🕐 Inicio: {new Date(result.startTime).toLocaleTimeString('es-AR')}</p>
-                )}
-                {result.endTime && (
-                  <p>🕐 Fin: {new Date(result.endTime).toLocaleTimeString('es-AR')}</p>
-                )}
-                {result.durationMs && (
-                  <p className="font-semibold text-blue-600 dark:text-blue-400">
-                    ⏱️ {(result.durationMs / 1000).toFixed(1)}s total
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {/* Información del caso */}
+              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+                  <span>👤</span> Información del Test
+                </h4>
+                <div className="space-y-2 text-sm">
+                  <p><span className="font-medium text-gray-600 dark:text-gray-400">Persona:</span> {result.testCase.persona}</p>
+                  <p><span className="font-medium text-gray-600 dark:text-gray-400">Objetivo:</span> {result.testCase.conversationGoal}</p>
+                  <p><span className="font-medium text-gray-600 dark:text-gray-400">Estado Final:</span> 
+                    <span className={result.finalStatus === 'SUCCESS' ? 'ml-2 font-semibold text-green-600 dark:text-green-400' : 'ml-2 font-semibold text-red-600 dark:text-red-400'}>
+                      {result.finalStatus}
+                    </span>
                   </p>
+                </div>
+              </div>
+              
+              {/* Métricas de tiempo */}
+              {(result.startTime || result.durationMs) && (
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                  <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+                    <span>⏱️</span> Métricas de Tiempo
+                  </h4>
+                  <div className="space-y-2 text-sm">
+                    {result.startTime && (
+                      <p><span className="font-medium text-gray-600 dark:text-gray-400">Inicio:</span> {new Date(result.startTime).toLocaleTimeString('es-AR')}</p>
+                    )}
+                    {result.endTime && (
+                      <p><span className="font-medium text-gray-600 dark:text-gray-400">Fin:</span> {new Date(result.endTime).toLocaleTimeString('es-AR')}</p>
+                    )}
+                    {result.durationMs && (
+                      <p><span className="font-medium text-gray-600 dark:text-gray-400">Duración Total:</span>
+                        <span className="ml-2 font-bold text-blue-600 dark:text-blue-400">
+                          {(result.durationMs / 1000).toFixed(1)}s
+                        </span>
+                      </p>
+                    )}
+                    <p><span className="font-medium text-gray-600 dark:text-gray-400">Turnos:</span> {result.executionTrace.length}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Análisis principal */}
+            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+              <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">📝 Análisis de Comportamiento</h4>
+              <p className="text-gray-700 dark:text-gray-300 leading-relaxed">{result.analysis.summary}</p>
+            </div>
+            
+            {/* Score general */}
+            <div className="mt-4 bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+              <div className="flex items-center justify-between">
+                <h4 className="font-semibold text-gray-700 dark:text-gray-300">🎯 Puntuación General</h4>
+                <div className="flex items-center gap-3">
+                  <ScoreIndicator score={result.analysis.overallScore} />
+                  <span className="text-2xl font-bold">
+                    <span className={getScoreColor(result.analysis.overallScore)}>
+                      {result.analysis.overallScore.toFixed(1)}
+                    </span>
+                    <span className="text-gray-400 dark:text-gray-500">/10</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            {/* Desglose por criterios */}
+            <div className="mt-4">
+              <h4 className="font-semibold text-gray-800 dark:text-gray-200 mb-3">📋 Evaluación por Criterios</h4>
+              <CriterionBreakdown analysis={result.analysis.criteriaBreakdown} />
+            </div>
+          </section>
+
+          {/* ============================================ */}
+          {/* 🗄️ SECCIÓN 2: BASE DE DATOS */}
+          {/* ============================================ */}
+          {result.databaseActivity && (
+            <section className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-5 border-2 border-purple-300 dark:border-purple-700">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-3xl">🗄️</span>
+                <h3 className="text-2xl font-bold text-purple-900 dark:text-purple-100">
+                  Actividad en Base de Datos
+                </h3>
+              </div>
+              
+              {/* Resumen de operaciones */}
+              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow mb-4">
+                <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">📊 Resumen de Operaciones</h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/20 rounded">
+                    <p className="text-2xl font-bold text-purple-600 dark:text-purple-400">{result.databaseActivity.totalOperations}</p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Total Operaciones</p>
+                  </div>
+                  <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded">
+                    <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                      {result.databaseActivity.changes?.filter((c: any) => c.type === 'INSERT').length || 0}
+                    </p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Inserciones</p>
+                  </div>
+                  <div className="text-center p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded">
+                    <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">
+                      {result.databaseActivity.changes?.filter((c: any) => c.type === 'UPDATE').length || 0}
+                    </p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Actualizaciones</p>
+                  </div>
+                  <div className="text-center p-3 bg-red-50 dark:bg-red-900/20 rounded">
+                    <p className="text-2xl font-bold text-red-600 dark:text-red-400">
+                      {result.databaseActivity.changes?.filter((c: any) => c.type === 'DELETE').length || 0}
+                    </p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Eliminaciones</p>
+                  </div>
+                </div>
+                {result.databaseActivity.tablesUsed && result.databaseActivity.tablesUsed.length > 0 && (
+                  <div className="mt-3 text-sm text-gray-600 dark:text-gray-400">
+                    <span className="font-medium">Tablas monitoreadas:</span> {result.databaseActivity.tablesUsed.join(', ')}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
-          
-          <div className="mt-4">
-            <h4 className="font-semibold text-gray-800 dark:text-gray-200">{t('criteriaBreakdown')}</h4>
-             <CriterionBreakdown analysis={result.analysis.criteriaBreakdown} />
-          </div>
+              
+              {/* Cambios detallados */}
+              {result.databaseActivity.changes && result.databaseActivity.changes.length > 0 && (
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow mb-4">
+                  <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">📝 Cambios Detectados</h4>
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {result.databaseActivity.changes.slice(0, 10).map((change: any, idx: number) => (
+                      <div key={idx} className={`p-3 rounded border-l-4 ${
+                        change.type === 'INSERT' ? 'bg-green-50 dark:bg-green-900/10 border-green-500' :
+                        change.type === 'UPDATE' ? 'bg-yellow-50 dark:bg-yellow-900/10 border-yellow-500' :
+                        'bg-red-50 dark:bg-red-900/10 border-red-500'
+                      }`}>
+                        <div className="flex items-start gap-2">
+                          <span className="text-lg">
+                            {change.type === 'INSERT' ? '➕' : change.type === 'UPDATE' ? '🔄' : '❌'}
+                          </span>
+                          <div className="flex-1">
+                            <p className="font-medium text-sm">
+                              <span className={`font-bold ${
+                                change.type === 'INSERT' ? 'text-green-700 dark:text-green-300' :
+                                change.type === 'UPDATE' ? 'text-yellow-700 dark:text-yellow-300' :
+                                'text-red-700 dark:text-red-300'
+                              }`}>
+                                {change.type}
+                              </span>
+                              {' '}en tabla{' '}
+                              <span className="font-mono bg-gray-200 dark:bg-gray-700 px-1 rounded text-xs">
+                                {change.table}
+                              </span>
+                            </p>
+                            {change.record && (
+                              <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 font-mono">
+                                {JSON.stringify(change.record).substring(0, 150)}...
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {result.databaseActivity.changes.length > 10 && (
+                      <p className="text-center text-sm text-gray-500 dark:text-gray-400 italic">
+                        ... y {result.databaseActivity.changes.length - 10} cambios más
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {result.databaseActivity.totalOperations === 0 && !result.databaseActivity.changes?.length && (
+                <div className="text-center py-6 text-gray-500 dark:text-gray-400">
+                  <p className="text-lg">⚠️ No se detectó actividad en la base de datos</p>
+                  <p className="text-sm mt-2">El agente no interactuó con las tablas monitoreadas durante esta conversación</p>
+                </div>
+              )}
+            </section>
+          )}
 
-          {/* 🎯 NUEVO: Verificación Administrativa - Lenguaje Claro */}
+          {/* 🎯 ANTIGUO: Verificación Administrativa - Lo mantengo por ahora para no romper nada */}
           {result.databaseActivity && (result.databaseActivity.changes?.length > 0 || result.databaseActivity.discrepancies?.length > 0) && (
             <div className="mt-4 p-5 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl border-2 border-blue-400 dark:border-blue-600 shadow-lg">
               <div className="flex items-center gap-3 mb-4">
@@ -413,6 +576,18 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* 🧠 NUEVO: Verificación Inteligente con Gemini AI */}
+          {result.databaseActivity && (result.databaseActivity as any).intelligentVerification && (
+            <div className="mt-4">
+              <div dangerouslySetInnerHTML={{ 
+                __html: generateDiscrepanciesReport(
+                  (result.databaseActivity as any).intelligentVerification,
+                  language
+                )
+              }} />
             </div>
           )}
 
@@ -654,6 +829,321 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
               )}
             </div>
           )}
+
+          {/* ============================================ */}
+          {/* 🔧 SECCIÓN 3: HERRAMIENTAS EXTERNAS */}
+          {/* ============================================ */}
+          {result.databaseActivity && (result.databaseActivity as any).intelligentVerification && (
+            <section className="bg-gradient-to-r from-orange-50 to-yellow-50 dark:from-orange-900/20 dark:to-yellow-900/20 rounded-xl p-5 border-2 border-orange-300 dark:border-orange-700">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-3xl">🔧</span>
+                <h3 className="text-2xl font-bold text-orange-900 dark:text-orange-100">
+                  Verificación de Herramientas y Acciones
+                </h3>
+              </div>
+              
+              {/* Render del reporte inteligente */}
+              <div dangerouslySetInnerHTML={{ 
+                __html: generateDiscrepanciesReport(
+                  (result.databaseActivity as any).intelligentVerification,
+                  language
+                )
+              }} />
+              
+              {/* Score de precisión */}
+              {((result.databaseActivity as any).intelligentVerification as any).overallScore !== undefined && (
+                <div className="mt-4 bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-gray-700 dark:text-gray-300">🎯 Precisión en Acciones</h4>
+                    <div className="flex items-center gap-3">
+                      <ScoreIndicator score={((result.databaseActivity as any).intelligentVerification as any).overallScore} />
+                      <span className="text-2xl font-bold">
+                        <span className={getScoreColor(((result.databaseActivity as any).intelligentVerification as any).overallScore)}>
+                          {((result.databaseActivity as any).intelligentVerification as any).overallScore.toFixed(1)}
+                        </span>
+                        <span className="text-gray-400 dark:text-gray-500">/10</span>
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
+                    Evaluación de la coherencia entre lo que el bot prometió hacer y lo que realmente ejecutó
+                  </p>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ============================================ */}
+          {/* 🔧 SECCIÓN: VERIFICACIÓN DE HERRAMIENTAS EXTERNAS (GMAIL, CALENDAR, ETC.) */}
+          {/* ============================================ */}
+          {result.toolVerifications && result.toolVerifications.length > 0 && (
+            <section className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-5 border-2 border-purple-300 dark:border-purple-700">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-3xl">🔧</span>
+                <h3 className="text-2xl font-bold text-purple-900 dark:text-purple-100">
+                  {language === 'es' ? 'Verificación de Herramientas Externas' : 'External Tools Verification'}
+                </h3>
+              </div>
+              
+              <div className="space-y-3">
+                {result.toolVerifications.map((verification, idx) => (
+                  <div 
+                    key={idx} 
+                    className={`p-4 rounded-lg border-2 ${
+                      verification.verified 
+                        ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700' 
+                        : 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <span className="text-2xl">{verification.verified ? '✅' : '❌'}</span>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-bold text-lg">
+                            {verification.claim.type === 'email' && '📧 Email'}
+                            {verification.claim.type === 'calendar' && '📅 Calendar'}
+                            {verification.claim.type === 'other' && '🔧 Other Tool'}
+                          </h4>
+                          <span className="text-xs text-gray-500 dark:text-gray-400">
+                            {language === 'es' ? 'Método' : 'Method'}: {verification.verificationMethod}
+                          </span>
+                        </div>
+                        
+                        <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
+                          <strong>{language === 'es' ? 'Acción prometida' : 'Promised action'}:</strong> {verification.claim.description}
+                        </p>
+                        
+                        <p className={`text-sm font-medium ${verification.verified ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>
+                          {verification.message}
+                        </p>
+                        
+                        {verification.evidence && (
+                          <details className="mt-2">
+                            <summary className="cursor-pointer text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">
+                              {language === 'es' ? 'Ver evidencia' : 'Show evidence'}
+                            </summary>
+                            <pre className="mt-2 p-2 bg-gray-100 dark:bg-gray-800 rounded text-xs overflow-auto">
+                              {JSON.stringify(verification.evidence, null, 2)}
+                            </pre>
+                          </details>
+                        )}
+                        
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                          {language === 'es' ? 'Verificado en' : 'Verified at'}: {new Date(verification.timestamp).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              {/* Resumen de verificaciones */}
+              <div className="mt-4 p-4 bg-white dark:bg-gray-800 rounded-lg shadow">
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <div className="text-2xl font-bold text-gray-700 dark:text-gray-300">
+                      {result.toolVerifications.length}
+                    </div>
+                    <div className="text-sm text-gray-600 dark:text-gray-400">
+                      {language === 'es' ? 'Total' : 'Total'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-2xl font-bold text-green-600 dark:text-green-400">
+                      {result.toolVerifications.filter(v => v.verified).length}
+                    </div>
+                    <div className="text-sm text-gray-600 dark:text-gray-400">
+                      {language === 'es' ? 'Verificadas' : 'Verified'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-2xl font-bold text-red-600 dark:text-red-400">
+                      {result.toolVerifications.filter(v => !v.verified).length}
+                    </div>
+                    <div className="text-sm text-gray-600 dark:text-gray-400">
+                      {language === 'es' ? 'Fallidas' : 'Failed'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ============================================ */}
+          {/* 📈 SECCIÓN 4: MÉTRICAS Y ESTADÍSTICAS */}
+          {/* ============================================ */}
+          <section className="bg-gradient-to-r from-green-50 to-teal-50 dark:from-green-900/20 dark:to-teal-900/20 rounded-xl p-5 border-2 border-green-300 dark:border-green-700">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">📈</span>
+              <h3 className="text-2xl font-bold text-green-900 dark:text-green-100">
+                Métricas y Estadísticas de Rendimiento
+              </h3>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Métricas de conversación */}
+              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                  <span>💬</span> Conversación
+                </h4>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Total de turnos:</span>
+                    <span className="font-bold text-green-600 dark:text-green-400">{result.executionTrace.length}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Exitosos:</span>
+                    <span className="font-bold text-green-600 dark:text-green-400">
+                      {result.executionTrace.filter(t => t.status === 'SUCCESS').length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Con errores:</span>
+                    <span className="font-bold text-red-600 dark:text-red-400">
+                      {result.executionTrace.filter(t => t.status === 'ERROR').length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Tasa de éxito:</span>
+                    <span className="font-bold">
+                      {((result.executionTrace.filter(t => t.status === 'SUCCESS').length / result.executionTrace.length) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Métricas de tiempo */}
+              {result.durationMs && (
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                  <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                    <span>⏱️</span> Rendimiento
+                  </h4>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 dark:text-gray-400">Duración total:</span>
+                      <span className="font-bold text-blue-600 dark:text-blue-400">
+                        {(result.durationMs / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 dark:text-gray-400">Tiempo por turno:</span>
+                      <span className="font-bold">
+                        {(result.durationMs / result.executionTrace.length / 1000).toFixed(2)}s
+                      </span>
+                    </div>
+                    {result.startTime && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Inicio:</span>
+                        <span className="font-mono text-xs">
+                          {new Date(result.startTime).toLocaleTimeString('es-AR')}
+                        </span>
+                      </div>
+                    )}
+                    {result.endTime && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Fin:</span>
+                        <span className="font-mono text-xs">
+                          {new Date(result.endTime).toLocaleTimeString('es-AR')}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {/* Métricas de base de datos */}
+              {result.databaseActivity && (
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                  <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                    <span>🗄️</span> Base de Datos
+                  </h4>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 dark:text-gray-400">Operaciones:</span>
+                      <span className="font-bold text-purple-600 dark:text-purple-400">
+                        {result.databaseActivity.totalOperations}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 dark:text-gray-400">Cambios:</span>
+                      <span className="font-bold">
+                        {result.databaseActivity.changes?.length || 0}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 dark:text-gray-400">Tablas usadas:</span>
+                      <span className="font-bold">
+                        {result.databaseActivity.tablesUsed?.length || 0}
+                      </span>
+                    </div>
+                    {result.databaseActivity.discrepancies && result.databaseActivity.discrepancies.length > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Discrepancias:</span>
+                        <span className="font-bold text-red-600 dark:text-red-400">
+                          {result.databaseActivity.discrepancies.length}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Resumen general de calidad */}
+            <div className="mt-4 bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+              <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                <span>🎯</span> Evaluación General de Calidad
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">Puntuación de Comportamiento:</p>
+                  <div className="flex items-center gap-3">
+                    <ScoreIndicator score={result.analysis.overallScore} />
+                    <span className="text-3xl font-bold">
+                      <span className={getScoreColor(result.analysis.overallScore)}>
+                        {result.analysis.overallScore.toFixed(1)}
+                      </span>
+                      <span className="text-gray-400 dark:text-gray-500 text-xl">/10</span>
+                    </span>
+                  </div>
+                </div>
+                {result.databaseActivity && (result.databaseActivity as any).intelligentVerification && (
+                  <div>
+                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">Precisión en Acciones:</p>
+                    <div className="flex items-center gap-3">
+                      <ScoreIndicator score={((result.databaseActivity as any).intelligentVerification as any).overallScore} />
+                      <span className="text-3xl font-bold">
+                        <span className={getScoreColor(((result.databaseActivity as any).intelligentVerification as any).overallScore)}>
+                          {((result.databaseActivity as any).intelligentVerification as any).overallScore.toFixed(1)}
+                        </span>
+                        <span className="text-gray-400 dark:text-gray-500 text-xl">/10</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              {/* Indicador visual de calidad general */}
+              <div className="mt-4">
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">Indicador de Calidad:</p>
+                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-500 ${
+                      result.analysis.overallScore >= 8 ? 'bg-green-500' :
+                      result.analysis.overallScore >= 5 ? 'bg-yellow-500' :
+                      'bg-red-500'
+                    }`}
+                    style={{ width: `${result.analysis.overallScore * 10}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">
+                  {result.analysis.overallScore >= 8 ? '✅ Excelente' :
+                   result.analysis.overallScore >= 5 ? '⚠️ Necesita Mejoras' :
+                   '❌ Deficiente'}
+                </p>
+              </div>
+            </div>
+          </section>
 
           <div className="flex items-center gap-4 mt-4">
             <button

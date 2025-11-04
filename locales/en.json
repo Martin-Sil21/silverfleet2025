@@ -4,6 +4,7 @@
   "appDescription": "A professional workbench to visually debug, test, and evaluate your n8n workflows with real, step-by-step execution analysis.",
   "footerText": "© {year} AI Agent Auditor. All rights reserved.",
   "auditInProgress": "Audit in Progress...",
+  "auditCancelled": "Audit cancelled by user",
   "errorTitle": "An error occurred",
   "error": "Error",
   "errorAction": "Start New Audit",

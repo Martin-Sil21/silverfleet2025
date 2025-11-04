@@ -49,7 +49,17 @@ export interface AuditConfig {
   enableDatabaseTracking?: boolean;
   databaseSchema?: Record<string, any[]>;
   realDatabaseConfig?: RealDatabaseConfig;
-  rawN8nJson?: string; // 🔥 NUEVO: JSON original del archivo n8n para re-auditar
+  rawN8nJson?: string; // JSON original del archivo n8n para re-auditar
+  toolCredentials?: Map<string, string>; // nodeId -> credentialId
+  dbCredentials?: Map<string, string>; // nodeId -> credentialId
+  integrationConfig?: {
+    enabledIntegrations: {
+      email?: { credentialId: string; type: 'gmail-oauth' | 'smtp' };
+      calendar?: { credentialId: string; type: 'google-calendar-oauth' };
+    };
+    verificationDelay?: number;
+  };
+  dependencies?: any; // 🔧 WorkflowDependencies (tools + subflows detectados)
 }
 
 export interface TestCase {
@@ -64,12 +74,27 @@ export interface CriterionAnalysis {
   criterion: string;
   score: number;
   justification: string;
+  evidence?: string[]; // Evidencia cuantificable
+  impact?: 'high' | 'medium' | 'low'; // Impacto del hallazgo
+}
+
+export interface KeyFinding {
+  type: 'critical' | 'warning' | 'strength' | 'recommendation';
+  title: string;
+  description: string;
+  evidence?: string[];
+  priority?: 'high' | 'medium' | 'low';
+  impact?: string;
 }
 
 export interface Analysis {
   overallScore: number;
-  summary: string;
+  summary: string; // Resumen ejecutivo (3-5 líneas)
   criteriaBreakdown: CriterionAnalysis[];
+  keyFindings?: KeyFinding[]; // Hallazgos principales
+  riskAssessment?: 'high' | 'medium' | 'low'; // Evaluación de riesgo
+  recommendations?: string[]; // Recomendaciones accionables
+  goalAchieved?: boolean; // Si se logró el objetivo de la persona
 }
 
 export interface ExecutionStep {
@@ -133,6 +158,8 @@ export interface AuditResult {
   startTime?: number; // Timestamp de inicio de la conversación
   endTime?: number; // Timestamp de fin de la conversación
   durationMs?: number; // Duración total en milisegundos
+  // 🔧 Tool verifications (Gmail, Calendar, etc.)
+  toolVerifications?: any[]; // ToolActionVerification[] from IntegrationManager
 }
 
 export interface ImprovementData {

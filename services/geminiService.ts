@@ -3,6 +3,11 @@ import type { AuditConfig, TestCase, Analysis, AuditResult, ImprovementData, Wor
 import { runConversationIndependently } from './independentConversationRunner';
 import { costTracker, type CostSummary } from './costTracker';
 import { initializeRealDatabaseAuditor, getRealDatabaseAuditor, cleanupRealDatabaseAuditor } from './realDatabaseAuditor';
+import { verifyToolExecutions, generateToolVerificationSummary } from './toolExecutionVerifier';
+import { analyzeWorkflowDependencies } from './workflowDependencyAnalyzer';
+import { verifyConversationIntelligently, generateDiscrepanciesReport, type IntelligentVerificationResult } from './intelligentToolVerificator';
+import { IntegrationManager, createIntegrationManager, type IntegrationConfig } from './IntegrationManager';
+import { promiseAllWithTimeout, promiseWithTimeout } from './apiUtils';
 
 // Exportar función para obtener el resumen de costos desde otros componentes
 export const getCostSummary = (): CostSummary => costTracker.getSummary();
@@ -354,12 +359,22 @@ export const findAgentMessageText = (data: any): string => {
 export const generateUserMessageText = async (
     testCase: TestCase,
     conversationHistory: ExecutionStep[],
-    language: string
+    language: string,
+    databaseContext?: string | null,
+    toolsContext?: string | null
 ): Promise<string> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
     console.log(`[${testCase.title}] ========== GENERANDO NUEVO MENSAJE ==========`);
     console.log(`[${testCase.title}] Historial tiene ${conversationHistory.length} turnos`);
+    console.log(`[${testCase.title}] Contexto de BD disponible: ${!!databaseContext}`);
+    console.log(`[${testCase.title}] Contexto de herramientas disponible: ${!!toolsContext}`);
+    if (databaseContext) {
+        console.log(`[${testCase.title}] 📊 Contexto BD:\n${databaseContext}`);
+    }
+    if (toolsContext) {
+        console.log(`[${testCase.title}] 🔧 Contexto herramientas:\n${toolsContext}`);
+    }
     console.log(`[${testCase.title}] Historial completo:`, JSON.stringify(conversationHistory, null, 2));
     
     const historyString = conversationHistory.map((turn, idx) => 
@@ -386,6 +401,10 @@ export const generateUserMessageText = async (
     
     Your Persona: "${testCase.persona}"
     Your Ultimate Goal: "${testCase.conversationGoal}"
+    
+    ${databaseContext ? `\n=== IMPORTANT CONTEXT FROM DATABASE ===\n${databaseContext}\n\nUse this context to make your conversation more realistic. For example:\n- If you're blocked, you might express frustration or ask why\n- If a price was quoted, you can reference it or negotiate\n- If a deposit was confirmed, you can ask about next steps\n=== END DATABASE CONTEXT ===\n` : ''}
+    
+    ${toolsContext ? `\n=== AVAILABLE EXTERNAL TOOLS ===\n${toolsContext}\n\nThe agent can use these tools, so you can naturally:\n- Ask for a quote to be sent by email\n- Request a meeting to be scheduled\n- Expect proposals/documents to be emailed\n=== END TOOLS CONTEXT ===\n` : ''}
     
     ${historyString ? `Full Conversation History:\n${historyString}` : "(This is the first message of the conversation.)"}
     
@@ -516,6 +535,8 @@ const analyzeResult = async (
     config: AuditConfig,
     result: Omit<AuditResult, 'analysis'>,
     language: string,
+    databaseActivity?: ReturnType<typeof getRealDatabaseAuditor> extends { getSummary(): infer T } ? T : never,
+    intelligentVerification?: IntelligentVerificationResult
 ): Promise<Analysis> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const { criteria, workflow, connections } = config;
@@ -533,6 +554,74 @@ const analyzeResult = async (
         t.output && typeof t.output === 'object' && 
         (t.output.blocked === true || t.output.intentional_block === true || t.output.intentional_end === true)
     );
+
+    // 🔧 Verificar ejecución de herramientas externas
+    let toolVerificationInfo = '';
+    if (config.auditType === 'real' && config.toolCredentials && config.toolCredentials.size > 0) {
+        try {
+            const toolVerifications = await verifyToolExecutions(executionTrace, config);
+            if (toolVerifications.length > 0) {
+                toolVerificationInfo = '\n\n' + generateToolVerificationSummary(toolVerifications);
+            }
+        } catch (error) {
+            console.error('Error verifying tool executions:', error);
+        }
+    }
+    
+    // 🗄️ NUEVO: Contexto de base de datos
+    let databaseContextInfo = '';
+    if (databaseActivity && config.auditType === 'real') {
+        databaseContextInfo = `\n\n=== DATABASE ACTIVITY SUMMARY ===\n`;
+        databaseContextInfo += `Total database operations: ${databaseActivity.totalOperations}\n`;
+        databaseContextInfo += `Tables monitored: ${databaseActivity.tablesUsed.join(', ')}\n`;
+        databaseContextInfo += `Changes detected: ${databaseActivity.changes?.length || 0}\n\n`;
+        
+        if (databaseActivity.changes && databaseActivity.changes.length > 0) {
+            databaseContextInfo += `Detailed Changes:\n`;
+            for (const change of databaseActivity.changes.slice(0, 10)) { // Primeros 10 cambios
+                const changeDesc = change.type === 'INSERT' ? 'New record created' :
+                                  change.type === 'UPDATE' ? 'Record updated' :
+                                  'Record deleted';
+                databaseContextInfo += `  - ${change.type} in "${change.table}": ${changeDesc}\n`;
+                if (change.before && change.after) {
+                    databaseContextInfo += `    Before: ${JSON.stringify(change.before).substring(0, 100)}...\n`;
+                    databaseContextInfo += `    After: ${JSON.stringify(change.after).substring(0, 100)}...\n`;
+                } else if (change.record) {
+                    databaseContextInfo += `    Data: ${JSON.stringify(change.record).substring(0, 100)}...\n`;
+                }
+            }
+        }
+        databaseContextInfo += `=== END DATABASE CONTEXT ===\n`;
+    }
+    
+    // 🧠 NUEVO: Contexto de verificación inteligente
+    let intelligentVerificationInfo = '';
+    if (intelligentVerification) {
+        intelligentVerificationInfo = `\n\n=== INTELLIGENT VERIFICATION RESULTS ===\n`;
+        intelligentVerificationInfo += `Overall Accuracy Score: ${intelligentVerification.overallScore.toFixed(1)}/10\n`;
+        intelligentVerificationInfo += `Discrepancies Found: ${intelligentVerification.discrepancies.length}\n\n`;
+        
+        if (intelligentVerification.discrepancies.length > 0) {
+            intelligentVerificationInfo += `Critical Issues Detected:\n`;
+            for (const disc of intelligentVerification.discrepancies) {
+                intelligentVerificationInfo += `  ❌ ${disc.type.toUpperCase()}: ${disc.title}\n`;
+                intelligentVerificationInfo += `     Description: ${disc.description}\n`;
+                intelligentVerificationInfo += `     Expected: ${JSON.stringify(disc.expected)}\n`;
+                intelligentVerificationInfo += `     Actual: ${JSON.stringify(disc.actual)}\n`;
+                intelligentVerificationInfo += `     Context: ${disc.context}\n`;
+                intelligentVerificationInfo += `     Severity: ${disc.severity}\n`;
+                if (disc.evidence && disc.evidence.length > 0) {
+                    intelligentVerificationInfo += `     Evidence: ${disc.evidence.join(', ')}\n`;
+                }
+                intelligentVerificationInfo += `\n`;
+            }
+        } else {
+            intelligentVerificationInfo += `✅ No discrepancies found - Agent behavior matches conversation claims.\n`;
+        }
+        
+        intelligentVerificationInfo += `Summary: ${intelligentVerification.summary}\n`;
+        intelligentVerificationInfo += `=== END INTELLIGENT VERIFICATION ===\n`;
+    }
 
     const prompt = `
     Act as an expert QA analyst. Your task is to analyze the execution of a test case against a given workflow and provide a detailed analysis.
@@ -554,25 +643,91 @@ const analyzeResult = async (
 
     Execution Trace (Full Conversation):
     ${traceSummary}
+    ${toolVerificationInfo}
+    ${databaseContextInfo}
+    ${intelligentVerificationInfo}
 
     Analysis Task:
-    1.  Provide a concise overall 'summary' of what happened during the test. 
-        - Assess if the persona's GOAL ("${testCase.conversationGoal}") was successfully met.
-        - Consider the conversation flow, agent responses, and whether the user got what they needed.
-        - If the user was blocked or the conversation ended early, evaluate if it was justified.
     
-    2.  For each criterion listed below, provide a score from 1 (terrible) to 10 (perfect) and a detailed 'justification':
-        - Be STRICT but FAIR. Don't give high scores just because there were no errors.
-        - Consider: Did the agent help the user achieve their goal? Was it helpful, accurate, and natural?
-        - A conversation that completes without errors but doesn't help the user is NOT a 10/10.
-        - Blocking a legitimate user request should result in low scores.
+    You are an EXPERT AUDITOR. Provide a PROFESSIONAL, DATA-DRIVEN analysis.
     
-    3.  Calculate the 'overallScore' as the average of the individual criteria scores.
+    1. **EXECUTIVE SUMMARY** ('summary' field - 3-5 sentences):
+       - Start with clear verdict: Did the persona achieve their goal ("${testCase.conversationGoal}")?
+       - Highlight the most critical finding (positive or negative)
+       - Quantify key metrics (e.g., "90% accuracy", "3 critical errors", "12 turns to completion")
+       - Professional tone, suitable for executive stakeholders
+       
+    2. **KEY FINDINGS** ('keyFindings' array):
+       Generate 3-5 key findings, categorized as:
+       - 🚨 CRITICAL: Blocking issues (wrong data, failed actions, security concerns)
+       - ⚠️ WARNING: Issues that impact experience but aren't blocking
+       - ✅ STRENGTH: Things that worked exceptionally well
+       - 💡 RECOMMENDATION: Actionable improvements
+       
+       Each finding MUST include:
+       - 'type': 'critical' | 'warning' | 'strength' | 'recommendation'
+       - 'title': Short, specific heading (e.g., "Email not sent despite agent claim")
+       - 'description': Detailed explanation with QUANTIFIABLE data
+       - 'evidence': Array of specific evidence (e.g., ["Agent said: 'Envié mail a juan@...'", "Gmail API: No email found in last 5min"])
+       - 'priority': 'high' | 'medium' | 'low'
+       - 'impact': Business impact description
+    
+    3. **CRITERIA BREAKDOWN** (standard):
+       For each criterion, provide:
+       - 'score': 1-10 (be STRICT - only 9-10 for exceptional performance)
+       - 'justification': Detailed explanation WITH NUMBERS
+       - 'evidence': Array of specific evidence points
+       - 'impact': 'high' | 'medium' | 'low' (how critical is this criterion?)
+       
+    4. **RISK ASSESSMENT** ('riskAssessment'):
+       - 'high': Critical issues found (wrong data, failed tools, security concerns)
+       - 'medium': Multiple warnings, goal partially achieved
+       - 'low': Minor issues only, goal fully achieved
+       
+    5. **RECOMMENDATIONS** ('recommendations' array):
+       - 3-5 ACTIONABLE recommendations
+       - Each must be specific and implementable
+       - Prioritize by impact
+       
+    6. **GOAL ACHIEVEMENT** ('goalAchieved'):
+       - true: Persona's goal was fully met
+       - false: Goal not achieved or only partially met
 
-    Audit Criteria: ${criteria.join(', ')}
+    Context to analyze:
+    - Total turns: ${totalTurns} (${successfulTurns} successful, ${errorTurns} errors)
+    - Final status: ${finalStatus}
+    ${wasBlocked ? '- ⚠️ Conversation blocked/ended intentionally' : ''}
+    - Audit criteria: ${criteria.join(', ')}
+
+    CRITICAL EVALUATION FACTORS:
+    ✅ DATABASE VERIFICATION:
+       ${databaseContextInfo ? '- Database changes detected - verify all claimed saves happened' : ''}
+       ${intelligentVerificationInfo ? '- Intelligent verification ran - check for discrepancies' : ''}
     
-    IMPORTANT: Your scores should reflect whether the USER'S GOAL was achieved, not just technical success.
-    A technically perfect conversation that doesn't help the user is a failure.
+    ✅ TOOL EXECUTION:
+       ${toolVerificationInfo ? '- Tool verifications available - penalize unexecuted promises' : ''}
+    
+    ✅ ACCURACY:
+       - Wrong prices → CRITICAL
+       - Wrong recipients → CRITICAL
+       - Data inconsistencies → WARNING/CRITICAL
+    
+    ✅ GOAL ACHIEVEMENT:
+       - Technical success WITHOUT helping user = LOW score (≤5)
+       - User blocked without valid reason = CRITICAL
+    
+    SCORING RULES:
+    - 9-10: Exceptional - Goal achieved, no issues, exceeded expectations
+    - 7-8: Good - Goal achieved with minor issues
+    - 5-6: Acceptable - Goal partially achieved or achieved with significant issues
+    - 3-4: Poor - Goal not achieved, multiple problems
+    - 1-2: Critical failure - Security issues, data corruption, complete failure
+
+    Execution Trace:
+    ${traceSummary}
+    ${toolVerificationInfo}
+    ${databaseContextInfo}
+    ${intelligentVerificationInfo}
     
     Your response must be a valid JSON object.
     ${getLanguageInstruction(language)}
@@ -588,6 +743,39 @@ const analyzeResult = async (
                 properties: {
                     overallScore: { type: Type.NUMBER },
                     summary: { type: Type.STRING },
+                    goalAchieved: { type: Type.BOOLEAN },
+                    riskAssessment: { 
+                        type: Type.STRING,
+                        enum: ['high', 'medium', 'low']
+                    },
+                    keyFindings: {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                type: { 
+                                    type: Type.STRING,
+                                    enum: ['critical', 'warning', 'strength', 'recommendation']
+                                },
+                                title: { type: Type.STRING },
+                                description: { type: Type.STRING },
+                                evidence: { 
+                                    type: Type.ARRAY,
+                                    items: { type: Type.STRING }
+                                },
+                                priority: { 
+                                    type: Type.STRING,
+                                    enum: ['high', 'medium', 'low']
+                                },
+                                impact: { type: Type.STRING },
+                            },
+                            required: ['type', 'title', 'description'],
+                        },
+                    },
+                    recommendations: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                    },
                     criteriaBreakdown: {
                         type: Type.ARRAY,
                         items: {
@@ -596,12 +784,20 @@ const analyzeResult = async (
                                 criterion: { type: Type.STRING },
                                 score: { type: Type.NUMBER },
                                 justification: { type: Type.STRING },
+                                evidence: { 
+                                    type: Type.ARRAY,
+                                    items: { type: Type.STRING }
+                                },
+                                impact: { 
+                                    type: Type.STRING,
+                                    enum: ['high', 'medium', 'low']
+                                },
                             },
                             required: ['criterion', 'score', 'justification'],
                         },
                     },
                 },
-                required: ['overallScore', 'summary', 'criteriaBreakdown'],
+                required: ['overallScore', 'summary', 'criteriaBreakdown', 'goalAchieved', 'riskAssessment'],
             },
         },
     });
@@ -634,7 +830,41 @@ export type ConversationState = {
     finalStatus: 'SUCCESS' | 'ERROR' | 'PENDING';
     startTime?: number; // ⏱️ Timestamp de inicio
     endTime?: number; // ⏱️ Timestamp de fin
+    toolVerifications?: import('./IntegrationManager').ToolActionVerification[]; // 🔧 Verificaciones de herramientas
 };
+
+// 🔗 Gestión global del IntegrationManager (similar a database auditor)
+let globalIntegrationManager: IntegrationManager | null = null;
+
+export function initializeGlobalIntegrationManager(
+    config: IntegrationConfig,
+    detectedTools?: any[],
+    detectedSubflows?: any[]
+): void {
+    if (globalIntegrationManager) {
+        console.warn('⚠️ [IntegrationManager] Ya existe un manager global, limpiando...');
+        globalIntegrationManager = null;
+    }
+    
+    try {
+        globalIntegrationManager = createIntegrationManager(config, detectedTools, detectedSubflows);
+        console.log('✅ [IntegrationManager] Manager global inicializado');
+    } catch (error) {
+        console.error('❌ [IntegrationManager] Error inicializando manager global:', error);
+        throw error;
+    }
+}
+
+export function getGlobalIntegrationManager(): IntegrationManager | null {
+    return globalIntegrationManager;
+}
+
+export function cleanupGlobalIntegrationManager(): void {
+    if (globalIntegrationManager) {
+        console.log('🧹 [IntegrationManager] Limpiando manager global');
+        globalIntegrationManager = null;
+    }
+}
 
 export const runFullAudit = async (
   config: AuditConfig,
@@ -643,6 +873,7 @@ export const runFullAudit = async (
   onResultComplete: ResultCallback,
   onAllComplete: CompletionCallback,
   language: string,
+  abortController?: AbortController, // 🛑 NUEVO: Controller para cancelar
 ) => {
     if (config.auditType === 'real') {
         if (!config.endpointUrl) {
@@ -697,13 +928,56 @@ export const runFullAudit = async (
                 tables: config.realDatabaseConfig.tables,
             };
             
+            // 🔧 NUEVO: Usar dependencies del config (ya analizadas en AgentConfig)
+            // Si no existen, analizar el workflow como fallback
+            let dependencies = config.dependencies;
+            
+            if (!dependencies) {
+                console.log(`\n🔧 [Tool Detection] Dependencies no encontradas en config, analizando workflow...`);
+                console.log(`   config.workflow tiene: ${config.workflow?.length || 0} nodos`);
+                
+                const workflowJson = JSON.stringify({ nodes: config.workflow || [] });
+                dependencies = analyzeWorkflowDependencies(workflowJson);
+            } else {
+                console.log(`\n🔧 [Tool Detection] Usando dependencies del config (pre-analizadas)`);
+            }
+            
+            console.log(`\n🔧 [Tool Detection] Herramientas detectadas:`);
+            console.log(`   - Emails: ${dependencies.tools.filter(t => t.toolType === 'email').length}`);
+            console.log(`   - Calendarios: ${dependencies.tools.filter(t => t.toolType === 'calendar').length}`);
+            console.log(`   - Subflows: ${dependencies.subflows.length}`);
+            console.log(`   - TOTAL tools: ${dependencies.tools.length}`);
+            
+            if (dependencies.tools.length === 0) {
+                console.log(`   ⚠️ NO SE DETECTARON HERRAMIENTAS EXTERNAS`);
+                console.log(`   📋 Lista completa de dependencies:`, JSON.stringify(dependencies, null, 2));
+            } else {
+                console.log(`   📋 Detalles de herramientas:`);
+                dependencies.tools.forEach((tool, idx) => {
+                    console.log(`      ${idx + 1}. ${tool.nodeName} (${tool.toolType}/${tool.specificType}) - Node ID: ${tool.nodeId}`);
+                });
+            }
+            
             let successCount = 0;
             let errorCount = 0;
             
             testCases.forEach(tc => {
                 try {
-                    // 🔥 Pasar el workflow para análisis inteligente de campos
-                    initializeRealDatabaseAuditor(tc.id, dbConfig as any, tc.initialPayload, config.workflow);
+                    // 🔥 Usar samplePayload como referencia (tiene la estructura correcta)
+                    // El payload de cada test case individual se completará después
+                    const referencePayload = tc.initialPayload && Object.keys(tc.initialPayload).length > 0 
+                        ? tc.initialPayload 
+                        : config.samplePayload;
+                    
+                    // 🔥 Pasar herramientas detectadas al auditor
+                    initializeRealDatabaseAuditor(
+                        tc.id, 
+                        dbConfig as any, 
+                        referencePayload, // Usar payload con estructura correcta
+                        config.workflow,
+                        dependencies.tools,
+                        dependencies.subflows
+                    );
                     successCount++;
                     onProgress({ message: `   ✅ Auditor BD para "${tc.title}"` });
                 } catch (error) {
@@ -714,6 +988,63 @@ export const runFullAudit = async (
             });
             
             onProgress({ message: `✅ Auditores inicializados: ${successCount} éxitos, ${errorCount} errores` });
+            
+            // 🔗 NUEVO: Inicializar IntegrationManager si hay configuración de herramientas
+            if (config.integrationConfig && 
+                (config.integrationConfig.enabledIntegrations.email || config.integrationConfig.enabledIntegrations.calendar)) {
+                try {
+                    onProgress({ message: `🔗 Inicializando IntegrationManager para verificación en tiempo real...` });
+                    
+                    const integrationConfig: IntegrationConfig = {
+                        enabledIntegrations: {},
+                        verificationDelay: config.integrationConfig.verificationDelay || 3
+                    };
+                    
+                    if (config.integrationConfig.enabledIntegrations.email) {
+                        integrationConfig.enabledIntegrations.email = config.integrationConfig.enabledIntegrations.email;
+                        onProgress({ message: `   📧 Gmail Integration habilitada` });
+                    }
+                    
+                    if (config.integrationConfig.enabledIntegrations.calendar) {
+                        integrationConfig.enabledIntegrations.calendar = config.integrationConfig.enabledIntegrations.calendar;
+                        onProgress({ message: `   📅 Calendar Integration habilitada` });
+                    }
+                    
+                    initializeGlobalIntegrationManager(
+                        integrationConfig,
+                        dependencies.tools,
+                        dependencies.subflows
+                    );
+                    
+                    onProgress({ message: `✅ IntegrationManager inicializado correctamente` });
+                    
+                    // 🔥 NUEVO: Probar conexión de todas las integraciones ANTES de iniciar
+                    onProgress({ message: `🔍 Probando conexión con integraciones externas...` });
+                    const integrationManager = getGlobalIntegrationManager();
+                    if (integrationManager) {
+                        const testResults = await integrationManager.testAllConnections();
+                        
+                        if (testResults.email) {
+                            onProgress({ message: `   📧 Gmail: ${testResults.email.message}` });
+                        }
+                        
+                        if (testResults.calendar) {
+                            onProgress({ message: `   📅 Calendar: ${testResults.calendar.message}` });
+                        }
+                        
+                        if (!testResults.allSuccess) {
+                            onProgress({ message: `⚠️ ADVERTENCIA: Algunas integraciones fallaron. Las verificaciones de herramientas pueden no funcionar correctamente.` });
+                            console.warn('⚠️ [Integration Test] Algunas integraciones fallaron:', testResults);
+                        } else {
+                            onProgress({ message: `✅ Todas las integraciones funcionando correctamente` });
+                        }
+                    }
+                } catch (error) {
+                    console.error('❌ Error inicializando IntegrationManager:', error);
+                    onProgress({ message: `⚠️ Error en IntegrationManager: ${error}` });
+                }
+            }
+            
         } else if (config.realDatabaseConfig) {
             console.warn('\n⚠️ [DB Audit] Configuración de BD incompleta:', config.realDatabaseConfig);
             onProgress({ message: `⚠️ Configuración de BD incompleta, auditoría de BD deshabilitada` });
@@ -724,25 +1055,59 @@ export const runFullAudit = async (
         onProgress({ message: `✅ Todas las personalidades cargadas. Iniciando conversaciones independientes...` });
         onProgress({ message: `🔥 Modo asíncrono: Cada conversación avanzará a su propio ritmo` });
 
-        // 🛑 Crear AbortController para poder cancelar todas las conversaciones
-        const abortController = new AbortController();
-        const abortSignal = abortController.signal;
+        // 🛑 Usar AbortController proporcionado o crear uno nuevo
+        const controller = abortController || new AbortController();
+        const abortSignal = controller.signal;
+        
+        // 🛑 Listener para detectar cancelación
+        if (abortSignal.aborted) {
+            onProgress({ message: '🛑 Auditoría cancelada antes de iniciar conversaciones' });
+            return;
+        }
 
         // 🚀 EJECUTAR TODAS LAS CONVERSACIONES EN PARALELO (cada una independiente)
+        // 🔥 IMPORTANTE: Cada conversación tiene su propio timeout generoso
+        const TIMEOUT_PER_CONVERSATION_MS = 90 * 60 * 1000; // 🔥 90 MINUTOS por conversación (12 turnos × ~7 min promedio)
+        
         const conversationPromises = conversations.map((conv, index) => 
-            runConversationIndependently(conv, index, config, onProgress, language, abortSignal)
+            promiseWithTimeout(
+                runConversationIndependently(conv, index, config, onProgress, language, abortSignal),
+                TIMEOUT_PER_CONVERSATION_MS,
+                `Conversación "${conv.testCase.title}" excedió el tiempo límite de 90 minutos`
+            ).catch(error => {
+                // Si una conversación falla o hace timeout, registrarlo pero NO bloquear las demás
+                if (error instanceof Error && error.message.includes('timeout')) {
+                    console.error(`🚨 TIMEOUT: Conversación "${conv.testCase.title}" no terminó a tiempo`);
+                    onProgress({ message: `⚠️ [${conv.testCase.title}] Timeout - conversación demoró más de 90 minutos` });
+                    conv.isComplete = true;
+                    conv.finalStatus = 'ERROR';
+                } else if (error instanceof Error && error.name === 'AbortError') {
+                    console.log(`🛑 [${conv.testCase.title}] Conversación cancelada`);
+                    conv.isComplete = true;
+                    conv.finalStatus = 'ERROR';
+                } else {
+                    console.error(`❌ [${conv.testCase.title}] Error en conversación:`, error);
+                    onProgress({ message: `❌ [${conv.testCase.title}] Error: ${error instanceof Error ? error.message : 'Unknown'}` });
+                    conv.isComplete = true;
+                    conv.finalStatus = 'ERROR';
+                }
+            })
         );
 
-        // Esperar a que TODAS las conversaciones terminen (o sean canceladas)
+        // Esperar a que TODAS las conversaciones terminen (o fallen individualmente)
+        // Ahora cada promesa maneja sus propios errores, así que Promise.all no falla
         try {
             await Promise.all(conversationPromises);
         } catch (error) {
-            if (error instanceof Error && error.name === 'AbortError') {
-                console.log('🛑 Todas las conversaciones fueron canceladas');
-                onProgress({ message: '🛑 Auditoría cancelada por el usuario' });
-            } else {
-                throw error; // Re-throw otros errores
-            }
+            // Solo llegaríamos aquí si hay un error inesperado que no fue manejado
+            console.error('🚨 Error inesperado en Promise.all:', error);
+            onProgress({ message: '⚠️ Error inesperado durante ejecución de conversaciones' });
+        }
+        
+        // 🛑 Verificar nuevamente si fue cancelado durante las conversaciones
+        if (abortSignal.aborted) {
+            onProgress({ message: '🛑 Auditoría cancelada durante ejecución' });
+            return;
         }
 
         onProgress({ message: "\n🎉 Todas las conversaciones finalizadas!" });
@@ -756,39 +1121,98 @@ export const runFullAudit = async (
         onProgress({ message: "📊 Todas las rondas completadas. Analizando resultados finales..." });
 
         const analysisPromises = conversations.map(async conv => {
-            onProgress({ message: `🔍 Analizando resultado final: "${conv.testCase.title}"...` });
-            const finalStatus = conv.finalStatus === 'PENDING' ? 'SUCCESS' : conv.finalStatus;
-            const analysis = await analyzeResult(config, { id: conv.testCase.id, testCase: conv.testCase, executionTrace: conv.history, finalStatus }, language);
-            
-            // 🗄️ Obtener resumen de BD ANTES de limpiar
-            let databaseActivity = undefined;
-            if (config.realDatabaseConfig && config.realDatabaseConfig.url) {
-                const auditor = getRealDatabaseAuditor(conv.testCase.id);
-                if (auditor) {
-                    databaseActivity = auditor.getSummary();
-                    onProgress({ message: `   📊 Actividad BD: ${databaseActivity.totalOperations} operaciones, ${databaseActivity.changes?.length || 0} cambios` });
+            try {
+                onProgress({ message: `🔍 Analizando resultado final: "${conv.testCase.title}"...` });
+                const finalStatus = conv.finalStatus === 'PENDING' ? 'SUCCESS' : conv.finalStatus;
+                
+                // 🗄️ Obtener resumen de BD ANTES de limpiar
+                let databaseActivity = undefined;
+                let intelligentVerification: IntelligentVerificationResult | undefined;
+                
+                if (config.realDatabaseConfig && config.realDatabaseConfig.url) {
+                    const auditor = getRealDatabaseAuditor(conv.testCase.id);
+                    if (auditor) {
+                        try {
+                            databaseActivity = auditor.getSummary();
+                            onProgress({ message: `   📊 Actividad BD: ${databaseActivity.totalOperations} operaciones, ${databaseActivity.changes?.length || 0} cambios` });
+                            
+                            // 🧠 NUEVO: Verificación inteligente con Gemini AI
+                            onProgress({ message: `   🧠 Ejecutando verificación inteligente...` });
+                            intelligentVerification = await verifyConversationIntelligently(
+                                conv.testCase.id,
+                                conv.history,
+                                databaseActivity.changes || [],
+                                auditor.snapshots,
+                                language
+                            );
+                            
+                            onProgress({ message: `   ✅ Verificación completada - Score: ${intelligentVerification.overallScore.toFixed(1)}/10, Discrepancias: ${intelligentVerification.discrepancies.length}` });
+                            
+                            // Agregar al databaseActivity para que se muestre en el reporte
+                            (databaseActivity as any).intelligentVerification = intelligentVerification;
+                        } catch (dbError) {
+                            onProgress({ message: `   ⚠️ Error en verificación de BD: ${dbError instanceof Error ? dbError.message : 'Error desconocido'}` });
+                            console.error('Error en verificación de BD:', dbError);
+                        }
+                    }
                 }
+                
+                // 🔥 ANALIZAR con contexto completo de BD e intelligent verification
+                const analysis = await analyzeResult(
+                    config, 
+                    { id: conv.testCase.id, testCase: conv.testCase, executionTrace: conv.history, finalStatus }, 
+                    language,
+                    databaseActivity,
+                    intelligentVerification
+                );
+                
+                // ⏱️ Calcular duración de la conversación
+                const durationMs = (conv.endTime && conv.startTime) ? (conv.endTime - conv.startTime) : undefined;
+                if (durationMs) {
+                    onProgress({ message: `   ⏱️ Duración: ${(durationMs / 1000).toFixed(1)}s` });
+                }
+                
+                const result: AuditResult = {
+                    id: conv.testCase.id,
+                    testCase: conv.testCase,
+                    executionTrace: conv.history,
+                    finalStatus,
+                    analysis,
+                    databaseActivity, // ✅ Agregado
+                    startTime: conv.startTime,
+                    endTime: conv.endTime,
+                    durationMs,
+                    toolVerifications: conv.toolVerifications // 🔧 NUEVO: Agregar verificaciones de herramientas
+                };
+                onResultComplete(result);
+                onProgress({ message: `✅ Análisis completo para "${conv.testCase.title}" - Score: ${analysis.overallScore.toFixed(1)}/10` });
+            } catch (error) {
+                onProgress({ message: `❌ Error analizando "${conv.testCase.title}": ${error instanceof Error ? error.message : 'Error desconocido'}` });
+                console.error(`Error analizando conversación "${conv.testCase.title}":`, error);
+                
+                // Crear resultado de error para que no se cuelgue el reporte
+                const errorResult: AuditResult = {
+                    id: conv.testCase.id,
+                    testCase: conv.testCase,
+                    executionTrace: conv.history,
+                    finalStatus: 'ERROR',
+                    analysis: {
+                        overallScore: 0,
+                        summary: `Error al analizar: ${error instanceof Error ? error.message : 'Error desconocido'}`,
+                        criteriaBreakdown: [],
+                        keyFindings: [{
+                            type: 'critical',
+                            title: 'Error en análisis',
+                            description: `No se pudo completar el análisis de esta conversación: ${error instanceof Error ? error.message : 'Error desconocido'}`,
+                            priority: 'high'
+                        }]
+                    },
+                    startTime: conv.startTime,
+                    endTime: conv.endTime,
+                    durationMs: (conv.endTime && conv.startTime) ? (conv.endTime - conv.startTime) : undefined,
+                };
+                onResultComplete(errorResult);
             }
-            
-            // ⏱️ Calcular duración de la conversación
-            const durationMs = (conv.endTime && conv.startTime) ? (conv.endTime - conv.startTime) : undefined;
-            if (durationMs) {
-                onProgress({ message: `   ⏱️ Duración: ${(durationMs / 1000).toFixed(1)}s` });
-            }
-            
-            const result: AuditResult = {
-                id: conv.testCase.id,
-                testCase: conv.testCase,
-                executionTrace: conv.history,
-                finalStatus,
-                analysis,
-                databaseActivity, // ✅ Agregado
-                startTime: conv.startTime,
-                endTime: conv.endTime,
-                durationMs
-            };
-            onResultComplete(result);
-            onProgress({ message: `✅ Análisis completo para "${conv.testCase.title}" - Score: ${analysis.overallScore.toFixed(1)}/10` });
         });
 
         await Promise.all(analysisPromises);
@@ -802,6 +1226,11 @@ export const runFullAudit = async (
                     console.error(`Error limpiando auditor para "${tc.id}":`, error);
                 }
             });
+            
+            // 🧹 NUEVO: Limpiar caché de snapshots
+            const { default: snapshotCache } = await import('./snapshotCache');
+            snapshotCache.clear();
+            console.log('🧹 Caché de snapshots limpiado');
         }
         
         // ⏱️ Mostrar resumen de tiempos
@@ -839,7 +1268,9 @@ export const runFullAudit = async (
         costTracker.printSummary(); // Log detallado en consola
         
         onProgress({ message: "\n🏁 AUDITORÍA COMPLETA - Todos los resultados procesados." });
+        console.log('🔥🔥🔥 Llamando a onAllComplete() para cambiar estado a REPORT_READY...');
         onAllComplete();
+        console.log('✅✅✅ onAllComplete() ejecutado - El reporte debería mostrarse ahora.');
 
     } else {
         // Visual audit runs sequentially as before
