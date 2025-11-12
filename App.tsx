@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit } from './types';
-import AgentConfig from './components/AgentConfig';
+import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit, type ParsedCodeProject } from './types';
+import ProjectTypeSelector from './components/ProjectTypeSelector';
 import AuditReport from './components/AuditReport';
 import ExecutiveReport from './components/ExecutiveReport';
 import { generateTestCases, runFullAudit } from './services/geminiService';
@@ -95,7 +95,7 @@ const App: React.FC = () => {
     console.log('✅ [App.tsx] Estado cambiado a REPORT_READY');
   }, []);
 
-  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => {
+  const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null, codeProject?: ParsedCodeProject }) => {
     setAuditStatus(AuditStatus.AUDITING);
     setAuditConfig(data.config);
     setN8nNodeData(data.n8nData);
@@ -354,7 +354,7 @@ const App: React.FC = () => {
         );
       case AuditStatus.CONFIG:
       default:
-        return <AgentConfig onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} onManageCredentials={() => setShowCredentialsPanel(true)} initialConfig={auditConfig} />;
+        return <ProjectTypeSelector onStartAudit={handleStartAudit} onViewHistory={handleViewHistory} onManageCredentials={() => setShowCredentialsPanel(true)} initialConfig={auditConfig} />;
     }
   };
   

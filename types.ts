@@ -194,3 +194,76 @@ export interface HistoricalAudit {
   overallScore: number;
   auditDurationMs?: number; // ⏱️ Duración total de la auditoría
 }
+
+// ====== NUEVOS TIPOS PARA PROYECTOS NODE/TYPESCRIPT ======
+
+export interface DetectedFramework {
+  name: string; // 'Express', 'NestJS', 'TypeScript', etc.
+  version?: string;
+  confidence: number; // 0-1
+  evidence: string[]; // Archivos/dependencias que lo evidencian
+}
+
+export interface DetectedDatabase {
+  provider: string; // 'PostgreSQL', 'MongoDB', 'Supabase', etc.
+  confidence: number;
+  evidence: string[]; // Conexiones encontradas
+  credentials?: string[]; // Variables de entorno relacionadas
+}
+
+export interface DetectedTool {
+  name: string; // 'Email', 'Calendar', 'Slack', 'Twilio', etc.
+  type: 'email' | 'calendar' | 'messaging' | 'crm' | 'storage' | 'other';
+  confidence: number;
+  evidence: string[]; // Imports/API calls encontrados
+}
+
+export interface DetectedAPI {
+  service: string; // 'OpenAI', 'Gemini', 'HuggingFace', etc.
+  type: 'ai' | 'external' | 'internal';
+  confidence: number;
+  evidence: string[];
+}
+
+export interface CodeAgentComponent {
+  type: 'agent' | 'tool' | 'middleware' | 'service';
+  name: string;
+  filePath: string;
+  systemPrompt?: string; // Para agentes IA
+  description: string;
+  imports: string[]; // Dependencias internas y externas
+}
+
+export interface ParsedCodeProject {
+  projectType: 'nodejs' | 'typescript' | 'python' | 'other';
+  framework?: DetectedFramework;
+  language: string;
+  confidence: number;
+  
+  // Componentes detectados
+  agents: CodeAgentComponent[];
+  tools: DetectedTool[];
+  databases: DetectedDatabase[];
+  apis: DetectedAPI[];
+  
+  // Metadatos del proyecto
+  dependencies: Record<string, string>; // package.json o equivalent
+  scripts: Record<string, string>; // Scripts disponibles
+  
+  // Para análisis
+  fileCount: number;
+  totalLines: number;
+  summary: string;
+  
+  // Información para auditoría
+  entryPoint?: string; // main file o index
+  apiEndpoints?: string[]; // Rutas HTTP detectadas
+  environmentVariables?: string[]; // Vars de entorno usadas
+}
+
+export interface CodeProjectAuditConfig extends AuditConfig {
+  projectPath?: string; // Para referencia
+  codeProject: ParsedCodeProject; // En lugar de workflow
+  projectType: 'nodejs' | 'typescript'; // Tipo de proyecto
+  rawZipBuffer?: ArrayBuffer; // Buffer original del ZIP
+}
