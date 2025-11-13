@@ -2,7 +2,7 @@
   "name": "test-support-agent",
   "version": "1.0.0",
   "description": "Test support agent for Silver Fleet auditing",
-  "main": "typescript-test-agent.ts",
+  "main": "index.ts",
   "dependencies": {
     "express": "^4.18.0",
     "openai": "^3.3.0"

@@ -39,8 +39,8 @@ export interface RealDatabaseConfig {
 }
 
 export interface AuditConfig {
-  workflow: WorkflowNode[];
-  connections: N8nConnection[];
+  workflow?: WorkflowNode[]; // n8n workflow (opcional si es ZIP)
+  connections?: N8nConnection[];
   criteria: string[];
   testCaseCount: number;
   samplePayload: Record<string, any>;
@@ -60,6 +60,7 @@ export interface AuditConfig {
     verificationDelay?: number;
   };
   dependencies?: any; // 🔧 WorkflowDependencies (tools + subflows detectados)
+  codeProject?: ParsedCodeProject; // 🔧 Para auditorías de ZIP projects
 }
 
 export interface TestCase {
@@ -229,9 +230,18 @@ export interface CodeAgentComponent {
   type: 'agent' | 'tool' | 'middleware' | 'service';
   name: string;
   filePath: string;
-  systemPrompt?: string; // Para agentes IA
+  systemPrompt?: string; // Para agentes IA (COMPLETO - multilineales)
   description: string;
   imports: string[]; // Dependencias internas y externas
+  // 🔧 Nuevos campos para mejor detección
+  framework?: string; // 'LangChain', 'CrewAI', 'Custom Agent Pattern', etc.
+  tools?: string[]; // Lista de herramientas/funciones del agente
+  confidence?: number; // 0-1 score de confianza en la detección
+  // 🆕 Campos para agentes IMPLÍCITOS
+  agentDetectionType?: AgentDetectionType;
+  behaviors?: AgentBehavior[];
+  handlers?: { name: string; filePath: string }[];
+  estimatedIntention?: string;
 }
 
 export interface ParsedCodeProject {
@@ -259,6 +269,10 @@ export interface ParsedCodeProject {
   entryPoint?: string; // main file o index
   apiEndpoints?: string[]; // Rutas HTTP detectadas
   environmentVariables?: string[]; // Vars de entorno usadas
+  
+  // 🆕 Para detección adaptativa
+  agentDetectionType?: AgentDetectionType;
+  implicitAgentAnalysis?: ImplicitAgentAnalysis;
 }
 
 export interface CodeProjectAuditConfig extends AuditConfig {
@@ -266,4 +280,33 @@ export interface CodeProjectAuditConfig extends AuditConfig {
   codeProject: ParsedCodeProject; // En lugar de workflow
   projectType: 'nodejs' | 'typescript'; // Tipo de proyecto
   rawZipBuffer?: ArrayBuffer; // Buffer original del ZIP
+}
+
+// ====== TIPOS PARA DETECCIÓN ADAPTATIVA DE AGENTES ======
+
+export enum AgentDetectionType {
+  EXPLICIT = "explicit",      // LangChain, CrewAI, OpenAI SDK - agentes con system prompt explícito
+  IMPLICIT = "implicit",      // Event-driven, state machine - lógica implícita
+  HYBRID = "hybrid",          // Mix de ambos
+  UNKNOWN = "unknown"
+}
+
+export interface AgentBehavior {
+  name: string;
+  type: 'greeting' | 'validation' | 'retrieval' | 'processing' | 'unknown';
+  description?: string;
+  inputTypes: string[];
+  outputTypes: string[];
+  toolsUsed: string[];
+  databasesUsed: string[];
+  conditionChecks: string[];  // if conditions que evalúa
+  confidenceScore: number;    // 0-1
+}
+
+export interface ImplicitAgentAnalysis {
+  detectionType: AgentDetectionType;
+  inferredSystemPrompt: string;
+  behaviors: AgentBehavior[];
+  mainHandlers: { name: string; filePath: string }[];
+  estimatedIntention: string;
 }

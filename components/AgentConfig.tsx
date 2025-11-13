@@ -10,8 +10,10 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
-import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection, HistoricalAudit } from '../types';
+import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection, HistoricalAudit, ParsedCodeProject } from '../types';
 import Card from './Card';
+// @ts-ignore - Force reload
+import { PayloadEditor } from './PayloadEditor';
 import { parseN8nWorkflow } from '../services/n8nParser';
 import { useTranslation } from '../hooks/useTranslation';
 import { suggestAuditCriteria, generateSamplePayload } from '../services/geminiService';
@@ -23,6 +25,11 @@ import CredentialModal from './CredentialModal';
 import type { CredentialType } from '../services/credentialsManager';
 import { mapToolTypeToCredentialType, getCredentialTypeLabel } from '../services/credentialsManager';
 import AuditHistory from './AuditHistory';
+import { generateZipProjectPayload } from '../services/zipProjectPayloadBuilder';
+import { analyzeCodeProjectDependencies } from '../services/codeProjectDependencyAnalyzer';
+import { convertZipAgentsToWorkflowNodes, generateZipWorkflowConnections } from '../services/zipToN8nAdapter';
+import { GoogleGenAI } from "@google/genai";
+import { deepAnalyzeProject } from '../services/deepProjectAnalyzer';
 
 // Icons
 import { UploadIcon } from './icons/UploadIcon';
@@ -36,15 +43,16 @@ import { BoltIcon } from './icons/BoltIcon';
 import Loader from './Loader';
 
 interface AgentConfigProps {
-  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null }) => void;
+  onStartAudit: (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null, codeProject?: ParsedCodeProject | null }) => void;
   onViewHistory: (item: HistoricalAudit) => void;
   onManageCredentials?: () => void;
   initialConfig?: AuditConfig | null;
+  codeProject?: ParsedCodeProject | null;
 }
 
 type ConfigStep = 1 | 2 | 3 | 4 | 5;
 
-const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, onManageCredentials, initialConfig }) => {
+const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, onManageCredentials, initialConfig, codeProject }) => {
   const { t, language } = useTranslation();
   
   const DEFAULT_CRITERIA = useMemo(() => [
@@ -97,7 +105,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   const [isSuggestingCriteria, setIsSuggestingCriteria] = useState(false);
   
   // Step 5: Final config
-  const [auditType, setAuditType] = useState<'visual' | 'real'>('visual');
+  const [auditType, setAuditType] = useState<'visual' | 'real'>('real');
   
   // Re-audit support
   useEffect(() => {
@@ -131,6 +139,160 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
       }
     }
   }, [initialConfig]);
+
+  // 🔥 NUEVO: Procesar codeProject ZIP al cargar
+  useEffect(() => {
+    if (!codeProject) return;
+
+    // Usar IIFE async para manejar await correctamente
+    (async () => {
+      try {
+        console.log('📦 Procesando ZIP project:', codeProject.framework?.name);
+        
+        // 1. Convertir agentes a workflow nodes
+        const workflowNodes = convertZipAgentsToWorkflowNodes(codeProject);
+        const connections = generateZipWorkflowConnections(workflowNodes);
+        
+        setWorkflow(workflowNodes);
+        setConnections(connections);
+        
+        // 2. Analizar dependencias del proyecto ZIP
+        analyzeCodeProjectDependencies(codeProject);
+        
+        // 3. 🔧 CONVERTIR databases y tools a formato DetectedDatabase/DetectedTool con nodeId
+        const mappedDatabases: any[] = codeProject.databases.map((db, idx) => {
+          // 🔧 Normalizar databaseType para que coincida con credentialsManager
+          let normalizedType = db.provider.toLowerCase();
+          
+          // Extraer el tipo real del provider (puede venir como "RAW SQL QUERIES / SUPABASE CLIENT")
+          if (normalizedType.includes('supabase')) normalizedType = 'supabase';
+          else if (normalizedType.includes('postgres')) normalizedType = 'postgres';
+          else if (normalizedType.includes('mysql')) normalizedType = 'mysql';
+          else if (normalizedType.includes('mongodb') || normalizedType.includes('mongo')) normalizedType = 'mongodb';
+          else if (normalizedType.includes('airtable')) normalizedType = 'airtable';
+          else if (normalizedType.includes('google') && normalizedType.includes('sheet')) normalizedType = 'google-sheets';
+          
+          console.log(`   🔧 Normalizing DB type: "${db.provider}" → "${normalizedType}"`);
+          
+          return {
+            nodeId: `zip-db-${normalizedType}-${idx}`,
+            nodeName: `${db.provider} Database`,
+            databaseType: normalizedType,
+            tables: (db as any).tables?.map((t: any) => t.name || t) || [],
+            operations: ['read', 'write'] as const,
+            requiresCredentials: true
+          };
+        });
+        
+        const mappedTools: any[] = codeProject.tools.map((tool, idx) => {
+          // 🔧 Normalizar toolType para que coincida con credentialsManager
+          let normalizedType = tool.type.toLowerCase();
+          
+          // Mapear tipos comunes
+          if (normalizedType.includes('whatsapp')) normalizedType = 'whatsapp';
+          else if (normalizedType.includes('telegram')) normalizedType = 'telegram';
+          else if (normalizedType.includes('slack')) normalizedType = 'slack';
+          else if (normalizedType.includes('discord')) normalizedType = 'messaging'; // fallback
+          else if (normalizedType.includes('email') || normalizedType.includes('gmail')) normalizedType = 'gmail';
+          else if (normalizedType.includes('calendar')) normalizedType = 'google-calendar';
+          
+          console.log(`   🔧 Normalizing Tool type: "${tool.type}" → "${normalizedType}"`);
+          
+          return {
+            nodeId: `zip-tool-${tool.name}-${idx}`,
+            nodeName: tool.name,
+            toolType: normalizedType,
+            specificType: normalizedType,
+            requiresCredentials: true
+          };
+        });
+        
+        console.log(`   🔧 Mapped ${mappedDatabases.length} databases with nodeIds`);
+        console.log(`   🔧 Mapped ${mappedTools.length} tools with nodeIds`);
+        
+        // 🔧 FILTRAR herramientas: solo incluir si realmente existen credenciales configurables
+        // Por ahora, ZIP projects NO incluyen tools automáticamente (son poco confiables)
+        const reliableTools: any[] = []; // Vacío hasta que mejoremos la detección
+        
+        // Convertir a formato compatible con el sistema n8n
+        setDependencies({
+          subflows: [],
+          tools: reliableTools, // 🔥 Vacío - solo BD por ahora
+          databases: mappedDatabases,
+          hasExternalDependencies: mappedDatabases.length > 0,
+        });
+        
+        console.log('✅ Deep analysis ya completo desde deepProjectAnalyzer');
+        console.log(`   Agentes detectados: ${codeProject.agents.length}`);
+        console.log(`   Bases de datos: ${codeProject.databases.length}`);
+        console.log(`   Herramientas: ${codeProject.tools.length}`);
+        console.log(`   APIs detectadas: ${codeProject.apis.length}`);
+        
+        // Mostrar detalles de bases de datos
+        if (codeProject.databases.length > 0) {
+          console.log('📊 Bases de datos detectadas:');
+          codeProject.databases.forEach((db, i) => {
+            console.log(`   ${i + 1}. ${db.provider}`);
+            console.log(`      Evidence: ${db.evidence.join(', ')}`);
+            if (db.credentials) {
+              console.log(`      Credentials: ${db.credentials.join(', ')}`);
+            }
+            
+            // 🔥 Mostrar tablas si están disponibles
+            if ((db as any).tables && Array.isArray((db as any).tables)) {
+              const tables = (db as any).tables;
+              console.log(`      Tablas detectadas: ${tables.length}`);
+              tables.slice(0, 5).forEach((table: any) => {
+                const fieldCount = table.fields?.length || 0;
+                console.log(`         - ${table.name} (${fieldCount} campos)`);
+              });
+              if (tables.length > 5) {
+                console.log(`         ... y ${tables.length - 5} más`);
+              }
+            }
+          });
+        }
+        
+        // Mostrar detalles de agentes
+        if (codeProject.agents.length > 0) {
+          console.log('🤖 Agentes IA detectados:');
+          codeProject.agents.forEach((agent, i) => {
+            console.log(`   ${i + 1}. ${agent.name} (${agent.type})`);
+            console.log(`      Detection: ${agent.agentDetectionType || 'N/A'}`);
+            if (agent.systemPrompt) {
+              const shortPrompt = agent.systemPrompt.substring(0, 80) + '...';
+              console.log(`      Prompt: ${shortPrompt}`);
+            }
+          });
+        }
+        
+        // 3. 🔧 Usar criterios por defecto (generales y efectivos)
+        // Los criterios generados por IA para ZIP son demasiado específicos y poco útiles
+        console.log('✅ Usando criterios por defecto generales');
+        setCriteria(DEFAULT_CRITERIA);
+        setIsSuggestingCriteria(false);
+        
+        // 4. Generar payload específico para ZIP
+        try {
+          console.log('🔄 Generando payload...');
+          const payload = await generateZipProjectPayload(codeProject, language);
+          setSamplePayload(payload);
+          setRawPayloadText(JSON.stringify(payload, null, 2));
+          console.log('✅ Payload generado');
+        } catch (payloadError) {
+          console.warn('⚠️ Error generando payload:', payloadError);
+          setSamplePayload({ conversationId: `conv_${Date.now()}`, message: 'Test message' });
+        }
+        
+      } catch (error) {
+        console.error('❌ Error procesando ZIP project:', error);
+        setCriteria(DEFAULT_CRITERIA);
+      } finally {
+        setIsSuggestingCriteria(false);
+      }
+    })();
+    
+  }, [codeProject, language]);
 
   // ============================================================================
   // STEP 1: Main Workflow Upload
@@ -283,10 +445,18 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
     setTestStatus('testing');
     setTestMessage('');
     try {
+      // 🔥 Payload mínimo para health check (no vacío para evitar 400)
+      const healthCheckPayload = samplePayload && Object.keys(samplePayload).length > 0
+        ? Object.keys(samplePayload).reduce((acc, key) => {
+            acc[key] = "test";
+            return acc;
+          }, {} as Record<string, string>)
+        : { test: "health_check" };
+      
       const response = await fetch(endpointUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}) // 🔥 Objeto vacío solo para probar salud del endpoint
+        body: JSON.stringify(healthCheckPayload)
       });
       if (!response.ok) {
         throw new Error(`El endpoint respondió con status ${response.status}: ${response.statusText}`);
@@ -300,8 +470,17 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
     }
   };
 
-  const isStep1Complete = parsedN8nData !== null && samplePayload !== null && 
-    (auditType === 'visual' || (auditType === 'real' && testStatus === 'success'));
+  const isStep1Complete = (() => {
+    const hasN8n = parsedN8nData !== null && samplePayload !== null;
+    const hasZip = codeProject !== null;
+    if (!hasN8n && !hasZip) return false;
+    
+    // Para n8n: siempre completo (ya validado en Step 1)
+    if (hasN8n) return true;
+    // Para ZIP: siempre completo (se autocarga)
+    if (hasZip) return true;
+    return false;
+  })();
 
   // ============================================================================
   // STEP 2: Subflows Upload
@@ -349,8 +528,14 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
     event.target.value = '';
   };
 
-  const isStep2Complete = dependencies?.subflows.length === 0 || 
-    dependencies?.subflows.every(sf => uploadedSubflows.has(sf.nodeId));
+  const isStep2Complete = (() => {
+    // Para ZIP: no hay subflows, siempre completo
+    if (codeProject && !parsedN8nData) return true;
+    
+    // Para n8n: verificar subflows
+    return dependencies?.subflows.length === 0 || 
+      dependencies?.subflows.every(sf => uploadedSubflows.has(sf.nodeId));
+  })();
 
   // ============================================================================
   // STEP 3: Credentials Configuration
@@ -403,7 +588,9 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   };
 
   const isStep3Complete = (() => {
-    // Check all tools have credentials
+    // For n8n AND ZIP projects, validate that all external dependencies are configured
+    
+    // For n8n projects, check all tools have credentials
     const toolsComplete = dependencies?.tools.every(t => toolCredentials.has(t.nodeId)) ?? true;
     
     // Check all database types have at least one credential configured
@@ -458,59 +645,87 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!parsedN8nData || !samplePayload) {
-      setFileError("Missing workflow or payload");
+    // Permitir n8n OR ZIP projects
+    const hasN8n = parsedN8nData && samplePayload;
+    const hasZip = codeProject;
+    
+    if (!hasN8n && !hasZip) {
+      setFileError("Se requiere un workflow n8n o un proyecto ZIP");
       return;
     }
     
-    if (auditType === 'real' && testStatus !== 'success') {
+    // Para auditoría real n8n: requiere test exitoso
+    if (hasN8n && testStatus !== 'success') {
       setTestMessage(t('testEndpointFirstError'));
       setTestStatus('error');
       return;
     }
     
-    // 📋 Construir realDatabaseConfig automáticamente si hay credenciales de BD
-    const dbConfigResult = buildDatabaseConfig(workflow, dbCredentials, rawN8nJson || undefined);
-    
-    if (dbConfigResult.warnings.length > 0) {
-      console.warn('⚠️ Database config warnings:', dbConfigResult.warnings);
+    // Para auditoría real ZIP: requiere endpoint URL
+    if (hasZip && !endpointUrl) {
+      setFileError("Se requiere una URL de endpoint para auditar el proyecto ZIP");
+      return;
     }
     
-    // 🔧 RE-ANALIZAR dependencies incluyendo subflows cargados
-    // El análisis inicial (línea 189) se hace sin subflows, por lo que puede tener tools: 0
-    console.log('\n🔧 [AgentConfig] Re-analizando dependencies con subflows cargados...');
-    const finalDependencies = rawN8nJson ? analyzeWorkflowDependencies(rawN8nJson) : dependencies;
-    console.log(`   Dependencies finales - Tools: ${finalDependencies?.tools.length || 0}, Subflows: ${finalDependencies?.subflows.length || 0}`);
+    // 📋 Construir realDatabaseConfig automáticamente si hay credenciales de BD (n8n o ZIP)
+    let dbConfigResult = { config: undefined, warnings: [] as string[] };
+    if ((hasN8n || hasZip) && workflow && dbCredentials.size > 0) {
+      console.log('\n📋 [AgentConfig] Construyendo database config...');
+      console.log(`   Proyecto: ${hasN8n ? 'n8n' : 'ZIP'}`);
+      console.log(`   Credenciales BD: ${dbCredentials.size}`);
+      console.log(`   Workflow nodes: ${workflow.length}`);
+      
+      dbConfigResult = buildDatabaseConfig(workflow, dbCredentials, rawN8nJson || undefined);
+      if (dbConfigResult.warnings.length > 0) {
+        console.warn('⚠️ Database config warnings:', dbConfigResult.warnings);
+      }
+      
+      if (dbConfigResult.config) {
+        console.log('✅ Database config construido:', {
+          type: dbConfigResult.config.type,
+          tables: dbConfigResult.config.tables
+        });
+      }
+    }
+    
+    // 🔧 RE-ANALIZAR dependencies incluyendo subflows cargados (solo n8n)
+    let finalDependencies = dependencies;
+    if (hasN8n && workflow) {
+      console.log('\n🔧 [AgentConfig] Re-analizando dependencies con subflows cargados...');
+      finalDependencies = rawN8nJson ? analyzeWorkflowDependencies(rawN8nJson) : dependencies;
+      console.log(`   Dependencies finales - Tools: ${finalDependencies?.tools.length || 0}, Subflows: ${finalDependencies?.subflows.length || 0}`);
+    }
     
     // 🔗 Construir integrationConfig para herramientas externas (Email, Calendar, etc.)
-    console.log('\n🔗 [AgentConfig] Estado antes de buildIntegrationConfig:');
-    console.log(`   Dependencies: ${finalDependencies ? 'Sí' : 'No'}`);
-    console.log(`   Tools detectadas: ${finalDependencies?.tools.length || 0}`);
-    console.log(`   Tool credentials configuradas: ${toolCredentials.size}`);
-    
-    if (finalDependencies && finalDependencies.tools.length > 0) {
+    let integrationConfig = undefined;
+    if (hasN8n && finalDependencies && finalDependencies.tools.length > 0) {
+      console.log('\n🔗 [AgentConfig] Estado antes de buildIntegrationConfig:');
+      console.log(`   Dependencies: ${finalDependencies ? 'Sí' : 'No'}`);
+      console.log(`   Tools detectadas: ${finalDependencies?.tools.length || 0}`);
+      console.log(`   Tool credentials configuradas: ${toolCredentials.size}`);
+      
       console.log('   📋 Lista de tools detectadas:');
       finalDependencies.tools.forEach(tool => {
         const hasCredential = toolCredentials.has(tool.nodeId);
         const credentialId = hasCredential ? toolCredentials.get(tool.nodeId) : 'NINGUNA';
         console.log(`      - ${tool.nodeName} (${tool.toolType}): ${hasCredential ? '✅' : '❌'} ${credentialId}`);
       });
-    }
-    
-    const integrationConfig = buildIntegrationConfig(finalDependencies, toolCredentials);
-    
-    if (integrationConfig) {
-      console.log('   ✅ IntegrationConfig construido exitosamente:', integrationConfig);
-    } else {
-      console.log('   ❌ IntegrationConfig NO construido (devolvió null)');
+      
+      integrationConfig = buildIntegrationConfig(finalDependencies, toolCredentials);
+      
+      if (integrationConfig) {
+        console.log('   ✅ IntegrationConfig construido exitosamente:', integrationConfig);
+      } else {
+        console.log('   ❌ IntegrationConfig NO construido (devolvió null)');
+      }
     }
     
     const config: AuditConfig = { 
-      workflow, 
-      connections, 
+      workflow: workflow || undefined, 
+      connections: connections || [], 
       criteria, 
       testCaseCount, 
-      samplePayload, 
+      samplePayload: samplePayload || {}, 
       auditType,
       endpointUrl: auditType === 'real' ? endpointUrl : undefined,
       rawN8nJson: rawN8nJson || undefined,
@@ -518,10 +733,14 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
       dbCredentials,
       realDatabaseConfig: dbConfigResult.config || undefined,
       integrationConfig: integrationConfig || undefined,
-      dependencies: finalDependencies || undefined // 🔧 Pasar dependencies RE-ANALIZADAS con tools detectadas
+      dependencies: finalDependencies || undefined
     };
     
-    onStartAudit({ config, n8nData: parsedN8nData });
+    onStartAudit({ 
+      config, 
+      n8nData: parsedN8nData || null,
+      codeProject: codeProject || undefined
+    });
   };
 
   const canStartAudit = isStep1Complete && isStep2Complete && isStep3Complete && isStep4Complete;
@@ -566,8 +785,157 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
     </div>
   );
 
-  const renderStep1 = () => (
-    <div className="space-y-6">
+  const renderStep1 = () => {
+    // =====================================
+    // PROYECTO ZIP: CARD 1 - Análisis del Proyecto
+    // =====================================
+    if (codeProject) {
+      return (
+        <div className="space-y-6">
+          <Card>
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
+              � Proyecto Analizado
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              Proyecto cargado y analizado correctamente
+            </p>
+            <div className="p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg">
+              <div className="flex items-center gap-3 mb-4">
+                <CheckCircleIcon className="w-6 h-6 text-green-600" />
+                <div>
+                  <p className="font-semibold text-green-900 dark:text-green-200">
+                    {codeProject.framework?.name || 'Framework detectado'}
+                  </p>
+                  <p className="text-sm text-green-700 dark:text-green-300">
+                    {codeProject.fileCount} archivos • {codeProject.agents.length} agentes • {codeProject.databases.length} BD
+                  </p>
+                </div>
+              </div>
+              
+              {/* Agentes resumidos */}
+              {codeProject.agents.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">🤖 Agentes IA:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {codeProject.agents.slice(0, 3).map((agent, idx) => (
+                      <span key={idx} className="px-2 py-1 text-xs bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 rounded">
+                        {agent.name}
+                      </span>
+                    ))}
+                    {codeProject.agents.length > 3 && (
+                      <span className="px-2 py-1 text-xs bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 rounded">
+                        +{codeProject.agents.length - 3} más
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {/* Bases de datos resumidas */}
+              {codeProject.databases.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">� Bases de Datos:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {codeProject.databases.map((db, idx) => {
+                      const tables = (db as any).tables || [];
+                      return (
+                        <span key={idx} className="px-2 py-1 text-xs bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 rounded">
+                          {db.provider} ({tables.length} tablas)
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {/* CARD 2: Payload de Entrada */}
+          <Card>
+            <PayloadEditor
+              payload={samplePayload}
+              onPayloadChange={setSamplePayload}
+              onGenerate={() => handleGeneratePayload(workflow, connections)}
+              isGenerating={isGeneratingPayload}
+              error={payloadError}
+            />
+          </Card>
+
+          {/* CARD 3: Endpoints de Agentes */}
+          <Card>
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
+              🔗 Endpoints de los Agentes
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              URL principal del webhook donde se enviarán las peticiones de prueba
+            </p>
+            <div className="space-y-4">
+              <input
+                type="url"
+                className="w-full p-3 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg font-mono text-sm"
+                value={endpointUrl}
+                onChange={(e) => setEndpointUrl(e.target.value)}
+                placeholder="https://tu-servidor.com/webhook/..."
+              />
+              
+              <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg">
+                <p className="text-sm text-blue-800 dark:text-blue-200">
+                  ℹ️ El test envía un objeto vacío <code className="px-1.5 py-0.5 bg-blue-100 dark:bg-blue-800 rounded font-mono text-xs">{'{}'}</code> para verificar que el endpoint responde correctamente.
+                </p>
+              </div>
+
+              <button 
+                type="button" 
+                onClick={handleTestEndpoint} 
+                disabled={testStatus === 'testing' || !endpointUrl}
+                className="w-full px-4 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              >
+                {testStatus === 'testing' ? '🔄 Testeando conexión...' : '🧪 Testear Salud del Endpoint'}
+              </button>
+              
+              {testStatus === 'success' && (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg text-green-700 dark:text-green-300">
+                  <CheckCircleIcon className="w-5 h-5" /> 
+                  <span className="font-medium">{testMessage}</span>
+                </div>
+              )}
+              {testStatus === 'error' && (
+                <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300">
+                  <XCircleIcon className="w-5 h-5" /> 
+                  <span className="font-medium">{testMessage}</span>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {/* CARD 4: Tipo de Auditoría (no más custom DB credentials card) */}
+          <Card>
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
+              🎯 Tipo de Auditoría
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              La auditoría enviará solicitudes reales a los endpoints/agentes.
+            </p>
+            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+              <div className="flex items-start gap-3">
+                <BoltIcon className="w-6 h-6 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-1" />
+                <div>
+                  <p className="font-semibold text-blue-900 dark:text-blue-200">Auditoría Real</p>
+                  <p className="text-sm text-blue-800 dark:text-blue-300 mt-1">
+                    Se ejecutarán todas las conversaciones contra los endpoints reales configurados.
+                    Cada agente recibe los payloads generados y responde en tiempo real.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </Card>
+        </div>
+      );
+    }
+
+    // Original n8n upload interface
+    return (
+      <div className="space-y-6">
       <Card>
         <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
           📤 {t('importN8nTitle')}
@@ -742,7 +1110,8 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
         </>
       )}
     </div>
-  );
+    );
+  };
 
   const renderStep2 = () => {
     if (!dependencies || dependencies.subflows.length === 0) {
@@ -963,16 +1332,18 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
       <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('criteriaDescription')}</p>
       
       <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-gray-700 dark:text-gray-300">Current Criteria:</h3>
-        <button 
-          type="button" 
-          onClick={() => fetchAndSetCriteria(workflow, connections)} 
-          disabled={isSuggestingCriteria} 
-          className="flex items-center gap-2 text-sm px-3 py-2 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50"
-        >
-          {isSuggestingCriteria ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
-          {isSuggestingCriteria ? 'Suggesting...' : 'AI Suggest'}
-        </button>
+        <h3 className="font-semibold text-gray-700 dark:text-gray-300">Criterios Actuales:</h3>
+        {workflow && (
+          <button 
+            type="button" 
+            onClick={() => fetchAndSetCriteria(workflow, connections)} 
+            disabled={isSuggestingCriteria} 
+            className="flex items-center gap-2 text-sm px-3 py-2 bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-400/40 disabled:opacity-50"
+          >
+            {isSuggestingCriteria ? <Loader/> : <SparklesIcon className="w-5 h-5"/>}
+            {isSuggestingCriteria ? 'Sugerencias...' : 'Sugerir con IA'}
+          </button>
+        )}
       </div>
       
       <div className="flex flex-wrap gap-2 mb-4">
@@ -1023,45 +1394,76 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   );
 
   const renderStep5 = () => {
-    // Construir DB config para mostrar preview de tablas detectadas
+    // Construir DB config para mostrar preview de tablas detectadas (solo n8n)
     let dbConfigPreview;
     try {
-      dbConfigPreview = buildDatabaseConfig(workflow, dbCredentials, rawN8nJson || undefined);
+      if (workflow) {
+        dbConfigPreview = buildDatabaseConfig(workflow, dbCredentials, rawN8nJson || undefined);
+      } else {
+        dbConfigPreview = { config: null, warnings: [] };
+      }
     } catch (error) {
       console.error('❌ Error building database config:', error);
       dbConfigPreview = { config: null, warnings: ['Error al analizar la configuración de base de datos'] };
     }
     
+    const isN8n = !!parsedN8nData;
+    const isZip = !!codeProject;
+    
     return (
     <Card>
       <h2 className="text-2xl font-semibold text-gray-800 dark:text-white mb-4">
-        🎯 Final Review
+        🎯 Revisión Final
       </h2>
       <div className="space-y-4">
+        {/* N8N Summary */}
+        {isN8n && (
+          <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <h3 className="font-semibold text-gray-900 dark:text-white mb-2">📋 Workflow n8n:</h3>
+            <ul className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+              <li>✓ Nodos cargados: <strong>{parsedN8nData?.nodes.length} nodes</strong></li>
+              <li>✓ Subflows: <strong>{dependencies?.subflows.length || 0} detectados, {uploadedSubflows.size} cargados</strong></li>
+              <li>✓ Herramientas configuradas: <strong>{toolCredentials.size}</strong></li>
+              <li>✓ Bases de datos: <strong>{dbCredentials.size}</strong></li>
+            </ul>
+          </div>
+        )}
+        
+        {/* ZIP Summary */}
+        {isZip && (
+          <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <h3 className="font-semibold text-gray-900 dark:text-white mb-2">📦 Proyecto ZIP:</h3>
+            <ul className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+              <li>✓ Framework: <strong>{codeProject.framework?.name || 'Node.js'}</strong></li>
+              <li>✓ Agentes IA: <strong>{codeProject.agents.length}</strong></li>
+              <li>✓ Bases de datos: <strong>{codeProject.databases.length}</strong></li>
+              <li>✓ APIs detectadas: <strong>{codeProject.apis.length}</strong></li>
+              <li>✓ Endpoint URL: <strong>{endpointUrl || '❌ Requerido'}</strong></li>
+            </ul>
+          </div>
+        )}
+        
+        {/* Common Summary */}
         <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
-          <h3 className="font-semibold text-gray-900 dark:text-white mb-2">Configuration Summary:</h3>
+          <h3 className="font-semibold text-gray-900 dark:text-white mb-2">⚙️ Configuración:</h3>
           <ul className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
-            <li>✓ Workflow loaded: <strong>{parsedN8nData?.nodes.length} nodes</strong></li>
-            <li>✓ Audit type: <strong>{auditType === 'visual' ? 'Visual Simulation' : 'Real Endpoint'}</strong></li>
-            <li>✓ Subflows: <strong>{dependencies?.subflows.length || 0} detected, {uploadedSubflows.size} uploaded</strong></li>
-            <li>✓ Tools configured: <strong>{toolCredentials.size}</strong></li>
-            <li>✓ Databases configured: <strong>{dbCredentials.size}</strong></li>
-            <li>✓ Audit criteria: <strong>{criteria.length}</strong></li>
-            <li>✓ Test cases to generate: <strong>{testCaseCount}</strong></li>
+            <li>✓ Tipo de auditoría: <strong>Real Endpoint</strong></li>
+            <li>✓ Criterios: <strong>{criteria.length}</strong></li>
+            <li>✓ Test cases: <strong>{testCaseCount}</strong></li>
           </ul>
         </div>
 
-        {/* Database Tables Preview */}
-        {dbConfigPreview.config && dbConfigPreview.config.tables.length > 0 && (
+        {/* Database Tables Preview (only n8n) */}
+        {isN8n && dbConfigPreview.config && dbConfigPreview.config.tables.length > 0 && (
           <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
             <div className="flex items-start gap-3">
               <div className="text-blue-600 dark:text-blue-400 text-2xl">🗄️</div>
               <div className="flex-1">
                 <h3 className="font-semibold text-blue-900 dark:text-blue-100 mb-2">
-                  Database Tracking Enabled
+                  Bases de Datos Bajo Monitoreo
                 </h3>
                 <p className="text-sm text-blue-800 dark:text-blue-200 mb-2">
-                  The following tables will be monitored for changes during real audits:
+                  Las siguientes tablas serán monitoreadas para cambios:
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {dbConfigPreview.config.tables.map(table => (
@@ -1074,7 +1476,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
                   ))}
                 </div>
                 <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-                  Database: {dbConfigPreview.config.type.toUpperCase()}
+                  Base de datos: {dbConfigPreview.config.type.toUpperCase()}
                 </p>
               </div>
             </div>

@@ -8,6 +8,7 @@ import { analyzeWorkflowDependencies } from './workflowDependencyAnalyzer';
 import { verifyConversationIntelligently, generateDiscrepanciesReport, type IntelligentVerificationResult } from './intelligentToolVerificator';
 import { IntegrationManager, createIntegrationManager, type IntegrationConfig } from './IntegrationManager';
 import { promiseAllWithTimeout, promiseWithTimeout } from './apiUtils';
+import snapshotCache from './snapshotCache';
 
 // Exportar función para obtener el resumen de costos desde otros componentes
 export const getCostSummary = (): CostSummary => costTracker.getSummary();
@@ -108,7 +109,7 @@ export const generateTestCases = async (
     onBatchGenerated?: (batch: TestCase[]) => void // 🔥 NUEVO: Callback para cada lote
 ): Promise<TestCase[]> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const { workflow, criteria, testCaseCount, connections, samplePayload } = config;
+    const { workflow, criteria, testCaseCount, connections, samplePayload, codeProject } = config;
 
     // 🔥 NUEVO: Generar lotes EN PARALELO para máxima velocidad
     const BATCH_SIZE = 20;
@@ -126,28 +127,45 @@ export const generateTestCases = async (
         
         console.log(`   📦 Lote ${batchIndex + 1}/${batches}: Iniciando generación de ${batchSize} test cases (${startIndex}-${startIndex + batchSize - 1})...`);
 
-        const prompt = `
-        Act as a senior QA engineer creating data for testing a conversational AI workflow. Your task is to generate ${batchSize} unique, realistic user profiles ("bot buyers").
-        
-        This is the workflow you are testing:
-        ${formatWorkflowForPrompt(workflow, connections)}
+        // 🔧 Preparar descripción del workflow/proyecto
+        let workflowDescription = '';
+        if (workflow) {
+          workflowDescription = `This is the workflow you are testing:\n${formatWorkflowForPrompt(workflow, connections)}`;
+        } else if (codeProject) {
+          workflowDescription = `This is a Node.js/TypeScript project with:
+- Framework: ${codeProject.framework?.name}
+- AI Agents: ${codeProject.agents.length} agent(s)
+- Databases: ${codeProject.databases.length}
+- Tools: ${codeProject.tools.length}
+- APIs: ${codeProject.apis.length}
+- Agents detected: ${codeProject.agents.map(a => a.name).join(', ')}`;
+        } else {
+          workflowDescription = 'This is a conversational AI system.';
+        }
 
-        This is the sample JSON structure the workflow expects for each message:
+        const prompt = `
+        Act as a senior QA engineer creating data for testing a conversational AI system. Your task is to generate ${batchSize} unique, realistic user profiles.
+        
+        ${workflowDescription}
+
+        This is the sample JSON structure the system expects for each message:
         ${JSON.stringify(samplePayload, null, 2)}
 
-        Based on your analysis of the workflow and the sample payload, for each of the ${batchSize} test cases, you must:
-        1.  Create a complete JSON payload (\`initialPayload\`) that is **relevant to the workflow's purpose** and follows the sample structure but with **completely new and unique data**. For example, if the workflow is for customer support, create different customer issues.
-        2.  Define a user 'persona' that describes the user's personality and communication style (e.g., "Impatient customer, uses short, direct sentences"). This persona should be consistent with the payload data.
-        3.  Define a clear 'conversationGoal' for the persona that is achievable through the provided workflow (e.g., "Find out why their delivery is late and get a new ETA").
-        4.  Provide a unique 'id' (starting from TC-${startIndex.toString().padStart(3, '0')}) and a concise 'title' for the test case that summarizes the persona's goal.
+        Audit criteria (what you're testing):
+        ${criteria.map((c, i) => `${i+1}. ${c}`).join('\n')}
+
+        Based on your analysis, for each of the ${batchSize} test cases, you must:
+        1.  Create a complete JSON payload (\`initialPayload\`) that follows the sample structure with **completely new and unique data**.
+        2.  Define a user 'persona' that describes the user's personality and communication style.
+        3.  Define a clear 'conversationGoal' that tests the system against the criteria above.
+        4.  Provide a unique 'id' (starting from TC-${startIndex.toString().padStart(3, '0')}) and a concise 'title'.
 
         Instructions:
-        - The \`conversationId\` in each \`initialPayload\` must be unique (use TC-${startIndex.toString().padStart(3, '0')}, TC-${(startIndex+1).toString().padStart(3, '0')}, etc.).
-        - The data across the different test cases must be distinct to simulate different users.
-        - The personas and goals must be directly related to the functions of the workflow you analyzed.
-        - The generated personas and payloads must be consistent with the theme and purpose implied by the sample payload. If the sample is about sales, create sales-related scenarios. If it's about support, create support-related scenarios.
+        - The \`conversationId\` in each \`initialPayload\` must be unique.
+        - Data across test cases must be distinct to simulate different users.
+        - Personas must be VARIED (different ages, personalities, needs, communication styles).
+        - Each goal should test one or more of the audit criteria.
         - Ensure the number of generated personas matches exactly ${batchSize}.
-        - Make each persona DIFFERENT from the previous batches (vary age, location, needs, personality, etc.).
 
         Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
         ${getLanguageInstruction(language)}
@@ -875,10 +893,25 @@ export const runFullAudit = async (
   language: string,
   abortController?: AbortController, // 🛑 NUEVO: Controller para cancelar
 ) => {
+    // 🔧 Detectar si es ZIP o n8n
+    const isCodeProject = !!config.codeProject;
+    const isN8nWorkflow = !!config.workflow && config.workflow.length > 0;
+    
+    if (!isN8nWorkflow && !isCodeProject) {
+      throw new Error("No valid workflow (n8n) or code project (ZIP) configured");
+    }
+
+    // Para ZIP con auditoría real: requiere endpoint
+    if (isCodeProject && config.auditType === 'real' && !config.endpointUrl) {
+      throw new Error("Endpoint URL is required for real audit of ZIP projects");
+    }
+
+    // Para n8n con auditoría real: requiere endpoint
+    if (isN8nWorkflow && config.auditType === 'real' && !config.endpointUrl) {
+      throw new Error("Endpoint URL is not configured for real audit");
+    }
+
     if (config.auditType === 'real') {
-        if (!config.endpointUrl) {
-            throw new Error("Endpoint URL is not configured for real audit.");
-        }
 
         // ⏱️ Iniciar tracking de tiempo total
         const auditStartTime = Date.now();
@@ -1075,14 +1108,16 @@ export const runFullAudit = async (
                 TIMEOUT_PER_CONVERSATION_MS,
                 `Conversación "${conv.testCase.title}" excedió el tiempo límite de 90 minutos`
             ).catch(error => {
+                // 🛑 Si es AbortError, propagar inmediatamente para detener todo
+                if (error instanceof Error && (error.name === 'AbortError' || error.message.includes('cancelada por el usuario'))) {
+                    console.log(`� [${conv.testCase.title}] Conversación cancelada - propagando error`);
+                    throw error; // 🔥 Propagar para que Promise.all se detenga
+                }
+                
                 // Si una conversación falla o hace timeout, registrarlo pero NO bloquear las demás
                 if (error instanceof Error && error.message.includes('timeout')) {
                     console.error(`🚨 TIMEOUT: Conversación "${conv.testCase.title}" no terminó a tiempo`);
                     onProgress({ message: `⚠️ [${conv.testCase.title}] Timeout - conversación demoró más de 90 minutos` });
-                    conv.isComplete = true;
-                    conv.finalStatus = 'ERROR';
-                } else if (error instanceof Error && error.name === 'AbortError') {
-                    console.log(`🛑 [${conv.testCase.title}] Conversación cancelada`);
                     conv.isComplete = true;
                     conv.finalStatus = 'ERROR';
                 } else {
@@ -1095,10 +1130,25 @@ export const runFullAudit = async (
         );
 
         // Esperar a que TODAS las conversaciones terminen (o fallen individualmente)
-        // Ahora cada promesa maneja sus propios errores, así que Promise.all no falla
         try {
             await Promise.all(conversationPromises);
         } catch (error) {
+            // 🛑 Si es cancelación, detener TODO inmediatamente
+            if (error instanceof Error && (error.name === 'AbortError' || error.message.includes('cancelada por el usuario'))) {
+                console.log('🛑 Auditoría cancelada - deteniendo análisis');
+                onProgress({ message: '🛑 Auditoría cancelada por el usuario' });
+                
+                // Marcar todas las conversaciones como canceladas
+                conversations.forEach(conv => {
+                    if (!conv.isComplete) {
+                        conv.isComplete = true;
+                        conv.finalStatus = 'ERROR';
+                    }
+                });
+                
+                return; // 🔥 Salir inmediatamente sin analizar resultados
+            }
+            
             // Solo llegaríamos aquí si hay un error inesperado que no fue manejado
             console.error('🚨 Error inesperado en Promise.all:', error);
             onProgress({ message: '⚠️ Error inesperado durante ejecución de conversaciones' });
@@ -1228,7 +1278,6 @@ export const runFullAudit = async (
             });
             
             // 🧹 NUEVO: Limpiar caché de snapshots
-            const { default: snapshotCache } = await import('./snapshotCache');
             snapshotCache.clear();
             console.log('🧹 Caché de snapshots limpiado');
         }
@@ -1272,21 +1321,6 @@ export const runFullAudit = async (
         onAllComplete();
         console.log('✅✅✅ onAllComplete() ejecutado - El reporte debería mostrarse ahora.');
 
-    } else {
-        // Visual audit runs sequentially as before
-        for (let i = 0; i < testCases.length; i++) {
-            const testCase = testCases[i];
-            onProgress({ message: `Executing visual test case ${i + 1}/${testCases.length}: "${testCase.title}"` });
-            const { executionTrace, finalStatus } = await executeWorkflowVisually(config, testCase, onProgress);
-            
-            onProgress({ message: `Analyzing results for "${testCase.title}"...` });
-            const analysis = await analyzeResult(config, { id: testCase.id, testCase, executionTrace, finalStatus }, language);
-            
-            const result: AuditResult = { id: testCase.id, testCase, executionTrace, analysis, finalStatus };
-            onResultComplete(result);
-            onProgress({ message: `Completed analysis for "${testCase.title}".` });
-        }
-        onAllComplete();
     }
 };
 
@@ -1347,7 +1381,8 @@ export const suggestImprovements = async (config: AuditConfig, results: AuditRes
     // In a real implementation, this would involve a complex prompt to another Gemini model.
     await delay(3000);
 
-    const improvedWorkflow = config.workflow.map(node => {
+    // Para n8n workflows, intentar mejorar los nodos
+    const improvedWorkflow = (config.workflow || []).map(node => {
         if (node.type === 'agent') {
             return {
                 ...node,

@@ -11,7 +11,7 @@ import { useTranslation } from '../hooks/useTranslation';
 import Card from './Card';
 import AgentConfig from './AgentConfig';
 import type { AuditConfig, ParsedN8nWorkflow, HistoricalAudit, ParsedCodeProject, CodeProjectAuditConfig } from '../types';
-import { analyzeCodeProject } from '../services/codeProjectAnalyzer';
+import { deepAnalyzeProject } from '../services/deepProjectAnalyzer';
 import { isZipFile, processZipFile } from '../services/zipHandler';
 import Loader from './Loader';
 
@@ -60,8 +60,8 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
       // Crear ArrayBuffer del ZIP
       const arrayBuffer = await file.arrayBuffer();
 
-      // Analizar proyecto
-      const analyzed = await analyzeCodeProject(arrayBuffer);
+      // 🔬 Analizar proyecto con análisis profundo (incluye agentes, BD, integraciones)
+      const analyzed = await deepAnalyzeProject(arrayBuffer, t('languageCode') || 'en');
       setCodeProject(analyzed);
       setSelectedType('nodejs');
     } catch (error: any) {
@@ -92,6 +92,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
           </h2>
         </div>
         <AgentConfig
+          codeProject={codeProject}
           onStartAudit={(data) => {
             onStartAudit({ ...data, codeProject });
           }}
@@ -216,7 +217,12 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                 </p>
                 <ul className="text-green-800 dark:text-green-300 space-y-1 text-xs">
                   <li>• Framework: {codeProject.framework?.name || 'Desconocido'}</li>
-                  <li>• Agentes IA: {codeProject.agents.length}</li>
+                  {codeProject.agents.length > 0 && (
+                    <li className="text-yellow-700 dark:text-yellow-400">
+                      • Agentes detectados: {codeProject.agents.length} 
+                      <span className="text-xs ml-2 italic">(sin auditoría completa en ZIP)</span>
+                    </li>
+                  )}
                   <li>• Bases de datos: {codeProject.databases.length}</li>
                   <li>• Herramientas: {codeProject.tools.length}</li>
                   <li>• APIs: {codeProject.apis.length}</li>

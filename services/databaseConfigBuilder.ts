@@ -37,25 +37,43 @@ export function buildDatabaseConfig(
       return { config: null, warnings: [] };
     }
     
-    // Analizar workflow para detectar tablas
-    let workflowNodes: any[] = workflow;
-    if (rawWorkflowJson) {
-      try {
-        const parsed = JSON.parse(rawWorkflowJson);
-        workflowNodes = parsed.nodes || workflow;
-      } catch (error) {
-        console.warn('Could not parse raw workflow JSON for table detection');
+    // 🔧 NUEVO: Intentar extraer tablas desde workflow nodes (para proyectos ZIP)
+    let detectedTables: string[] = [];
+    
+    // Buscar nodos con información de tablas (proyectos ZIP tienen esto)
+    workflow.forEach(node => {
+      if ((node as any).tables && Array.isArray((node as any).tables)) {
+        const nodeTables = (node as any).tables as string[];
+        detectedTables.push(...nodeTables);
+        console.log(`   📊 Tablas encontradas en node ${node.id}:`, nodeTables);
+      }
+    });
+    
+    // Si encontramos tablas en workflow nodes, usarlas directamente
+    if (detectedTables.length > 0) {
+      console.log(`   ✅ Usando ${detectedTables.length} tablas desde workflow nodes (proyecto ZIP)`);
+    } else {
+      // Sino, analizar workflow tradicional (n8n)
+      let workflowNodes: any[] = workflow;
+      if (rawWorkflowJson) {
+        try {
+          const parsed = JSON.parse(rawWorkflowJson);
+          workflowNodes = parsed.nodes || workflow;
+        } catch (error) {
+          console.warn('Could not parse raw workflow JSON for table detection');
+        }
+      }
+      
+      const dbInfo = analyzeWorkflowDatabases(workflowNodes);
+      detectedTables = dbInfo.tables;
+      
+      console.log(`   📊 Tablas detectadas via análisis n8n: ${detectedTables.length}`);
+      if (detectedTables.length > 0) {
+        console.log(`   Tables: ${detectedTables.join(', ')}`);
       }
     }
     
-    const dbInfo = analyzeWorkflowDatabases(workflowNodes);
-    
-    console.log(`   Tables detected: ${dbInfo.tables.length}`);
-    if (dbInfo.tables.length > 0) {
-      console.log(`   Tables: ${dbInfo.tables.join(', ')}`);
-    }
-    
-    if (dbInfo.tables.length === 0) {
+    if (detectedTables.length === 0) {
       warnings.push('No database tables detected in workflow');
       console.log('   ⚠️ No tables detected - check workflow structure');
       return { config: null, warnings };
@@ -101,7 +119,7 @@ export function buildDatabaseConfig(
         type: 'supabase',
         url: credData.url,
         key: credData.key,
-        tables: dbInfo.tables
+        tables: detectedTables
       };
       break;
     
@@ -114,7 +132,7 @@ export function buildDatabaseConfig(
         type: 'airtable',
         url: `https://api.airtable.com/v0/${credData.baseId}`,
         key: credData.apiKey,
-        tables: dbInfo.tables
+        tables: detectedTables
       };
       break;
     
@@ -123,7 +141,7 @@ export function buildDatabaseConfig(
         type: 'google-sheets',
         url: '', // Google Sheets API uses different URL structure
         key: '', // OAuth token would go here
-        tables: dbInfo.tables
+        tables: detectedTables
       };
       warnings.push('Google Sheets database auditing requires additional OAuth setup');
       break;

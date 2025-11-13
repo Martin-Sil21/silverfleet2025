@@ -18,6 +18,7 @@ import { getRealDatabaseAuditor } from './realDatabaseAuditor';
 import { extractBotPromises, verifyBotPromises } from './intelligentDatabaseVerifier';
 import { IntegrationManager, type ToolActionVerification } from './IntegrationManager';
 import { fetchWithTimeout, retryAsync, promiseWithTimeout, isRetryableError, delay } from './apiUtils';
+import { analyzeWebhookError, extractLastBotMessage, extractLastUserMessage } from './intelligentErrorAnalyzer';
 
 const MAX_CONVERSATION_TURNS = 12;
 const FETCH_TIMEOUT_MS = 5 * 60 * 1000; // 🔥 5 MINUTOS para cada request al webhook (workflows complejos pueden tardar)
@@ -61,7 +62,7 @@ export const runConversationIndependently = async (
             console.log(`🛑 [${conv.testCase.title}] Conversación cancelada en turno ${turnCount}`);
             conv.isComplete = true;
             conv.finalStatus = 'ERROR';
-            break;
+            throw new Error('Auditoría cancelada por el usuario'); // 🔥 Lanzar error para salir inmediatamente
         }
         
         if (conv.isComplete) {
@@ -246,6 +247,12 @@ export const runConversationIndependently = async (
                 step: pendingStep
             });
             
+            // 🛑 Verificar cancelación antes de hacer el request
+            if (abortSignal?.aborted) {
+                console.log(`🛑 [${conv.testCase.title}] Cancelado antes de enviar request`);
+                throw new Error('Auditoría cancelada por el usuario');
+            }
+            
             // 4️⃣ Snapshot BEFORE (si DB audit activa)
             console.log(`\n🔍 [${conv.testCase.title}] ===== VERIFICANDO AUDITORÍA DE BD =====`);
             console.log(`   config.realDatabaseConfig existe:`, !!config.realDatabaseConfig);
@@ -326,7 +333,6 @@ export const runConversationIndependently = async (
             if (!responseText || responseText.trim() === '') {
                 // Respuesta vacía - analizar si es bloqueo
                 console.warn(`⚠️ [${conv.testCase.title}] Respuesta vacía`);
-                const { analyzeWebhookError, extractLastBotMessage, extractLastUserMessage } = await import('./intelligentErrorAnalyzer');
                 
                 const userId = (conv.testCase.initialPayload as any).telefono || 
                               (conv.testCase.initialPayload as any).phone || 
