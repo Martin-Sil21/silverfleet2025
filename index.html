@@ -44,6 +44,94 @@
         }
       }
     </script>
+    <style>
+      /* Scrollbar personalizado elegante */
+      .scrollbar-thin {
+        scrollbar-width: thin;
+      }
+      
+      /* Webkit scrollbars (Chrome, Safari, Edge) */
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      
+      .scrollbar-thumb-gray-300::-webkit-scrollbar-thumb {
+        background-color: #d1d5db;
+        border-radius: 10px;
+      }
+      
+      .scrollbar-thumb-gray-400::-webkit-scrollbar-thumb {
+        background-color: #9ca3af;
+        border-radius: 10px;
+      }
+      
+      .scrollbar-thumb-gray-600::-webkit-scrollbar-thumb {
+        background-color: #4b5563;
+        border-radius: 10px;
+      }
+      
+      .scrollbar-thumb-gray-700::-webkit-scrollbar-thumb {
+        background-color: #374151;
+        border-radius: 10px;
+      }
+      
+      .scrollbar-thumb-green-600::-webkit-scrollbar-thumb {
+        background-color: #059669;
+        border-radius: 10px;
+      }
+      
+      .scrollbar-track-transparent::-webkit-scrollbar-track {
+        background-color: transparent;
+      }
+      
+      .scrollbar-track-gray-800::-webkit-scrollbar-track {
+        background-color: #1f2937;
+      }
+      
+      /* Hover effects */
+      .hover\:scrollbar-thumb-gray-400:hover::-webkit-scrollbar-thumb {
+        background-color: #9ca3af;
+      }
+      
+      .hover\:scrollbar-thumb-gray-500:hover::-webkit-scrollbar-thumb {
+        background-color: #6b7280;
+      }
+      
+      .hover\:scrollbar-thumb-gray-600:hover::-webkit-scrollbar-thumb {
+        background-color: #4b5563;
+      }
+      
+      /* Dark mode scrollbars */
+      @media (prefers-color-scheme: dark) {
+        .dark\:scrollbar-thumb-gray-600::-webkit-scrollbar-thumb {
+          background-color: #4b5563;
+        }
+        
+        .dark\:scrollbar-thumb-gray-700::-webkit-scrollbar-thumb {
+          background-color: #374151;
+        }
+        
+        .dark\:hover\:scrollbar-thumb-gray-500:hover::-webkit-scrollbar-thumb {
+          background-color: #6b7280;
+        }
+        
+        .dark\:hover\:scrollbar-thumb-gray-600:hover::-webkit-scrollbar-thumb {
+          background-color: #4b5563;
+        }
+      }
+      
+      /* Hide scrollbar on hover for cleaner look */
+      .scrollbar-hide-until-hover::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+      
+      .scrollbar-hide-until-hover:hover::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+    </style>
   <script type="importmap">
 {
   "imports": {

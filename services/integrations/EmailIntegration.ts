@@ -272,6 +272,53 @@ export class GmailIntegration {
       
       const data = await response.json();
       
+      // 🔥 Obtener snippet de últimos 3 emails
+      const recentEmails: any[] = [];
+      try {
+        const messagesResponse = await fetch(
+          'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=3',
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        
+        if (messagesResponse.ok) {
+          const messagesData = await messagesResponse.json();
+          
+          // Obtener detalles de cada mensaje
+          for (const msg of (messagesData.messages || []).slice(0, 3)) {
+            const msgDetailResponse = await fetch(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+              }
+            );
+            
+            if (msgDetailResponse.ok) {
+              const msgDetail = await msgDetailResponse.json();
+              const headers = msgDetail.payload?.headers || [];
+              const subject = headers.find((h: any) => h.name === 'Subject')?.value || '(Sin asunto)';
+              const from = headers.find((h: any) => h.name === 'From')?.value || '(Desconocido)';
+              const date = headers.find((h: any) => h.name === 'Date')?.value || '';
+              
+              recentEmails.push({
+                subject: subject.substring(0, 50) + (subject.length > 50 ? '...' : ''),
+                from: from.substring(0, 40) + (from.length > 40 ? '...' : ''),
+                date: new Date(date).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+              });
+            }
+          }
+        }
+      } catch (emailsError) {
+        console.warn('No se pudieron cargar emails recientes:', emailsError);
+      }
+      
       // console.log(`📧 [Gmail] Conexión exitosa. Email: ${data.emailAddress}`);
       
       return {
@@ -281,7 +328,8 @@ export class GmailIntegration {
           emailAddress: data.emailAddress,
           messagesTotal: data.messagesTotal,
           threadsTotal: data.threadsTotal,
-          authType: this.credentialType === 'service-account' ? 'Service Account' : 'OAuth'
+          authType: this.credentialType === 'service-account' ? 'Service Account' : 'OAuth',
+          recentEmails: recentEmails.length > 0 ? recentEmails : undefined
         }
       };
       

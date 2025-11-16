@@ -937,6 +937,41 @@ export const runFullAudit = async (
             onProgress({ message: `👤 Personalidad ${idx + 1}/${testCases.length}: "${tc.title}" - ${tc.persona}` });
         });
         
+        // ========== TIMEOUT Y ERROR HANDLING ==========
+        const CONVERSATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos por conversación
+        const conversationTimeouts = new Map<string, NodeJS.Timeout>();
+
+        // Setup timeout para cada conversación
+        conversations.forEach((conv, idx) => {
+          const timeout = setTimeout(() => {
+            console.error(`⏱️ TIMEOUT: Conversación "${conv.testCase.title}" excedió ${CONVERSATION_TIMEOUT_MS}ms`);
+            
+            // Marcar como completada con ERROR
+            conv.isComplete = true;
+            conv.finalStatus = 'ERROR';
+            
+            // Notificar
+            onProgress({ 
+              message: `   ⏱️ TIMEOUT: "${conv.testCase.title}" (excedió 5 minutos)`,
+              testCaseId: conv.testCase.id,
+              step: {
+                nodeId: 'timeout',
+                status: 'ERROR',
+                input: conv.testCase.initialPayload,
+                output: { error: 'Conversation timeout' },
+                log: `Timeout after ${CONVERSATION_TIMEOUT_MS}ms`,
+                durationMs: CONVERSATION_TIMEOUT_MS,
+                timestamp: Date.now()
+              }
+            });
+          }, CONVERSATION_TIMEOUT_MS);
+          
+          conversationTimeouts.set(conv.testCase.id, timeout);
+        });
+
+        console.log(`   ⏱️ Timeouts configurados (${CONVERSATION_TIMEOUT_MS}ms por conversación)`);
+        // ============================================
+        
         // 🗄️ Inicializar auditores de BD si está configurado
         console.log(`\n🔍 [Audit Start] Verificando configuración de BD...`);
         console.log(`   realDatabaseConfig existe:`, !!config.realDatabaseConfig);
@@ -1002,12 +1037,20 @@ export const runFullAudit = async (
                         ? tc.initialPayload 
                         : config.samplePayload;
                     
+                    // 🔥 Para proyectos ZIP: NO pasar workflow (son nodos simulados sin info de BD)
+                    // Para n8n: sí pasar workflow (tienen info real de nodos Supabase/Postgres)
+                    const workflowForAnalysis = isCodeProject ? undefined : config.workflow;
+                    
+                    if (isCodeProject) {
+                        console.log(`   📦 [${tc.title}] Proyecto ZIP: Usando solo auto-detección de BD`);
+                    }
+                    
                     // 🔥 Pasar herramientas detectadas al auditor
                     initializeRealDatabaseAuditor(
                         tc.id, 
                         dbConfig as any, 
                         referencePayload, // Usar payload con estructura correcta
-                        config.workflow,
+                        workflowForAnalysis, // undefined para ZIP, workflow real para n8n
                         dependencies.tools,
                         dependencies.subflows
                     );
@@ -1315,6 +1358,14 @@ export const runFullAudit = async (
         onProgress({ message: `💰   - Output: ${costSummary.responseTokens.toLocaleString()} tokens` });
         onProgress({ message: "💰━━━━━━━━━━━━━━━━━━━━━━\n" });
         costTracker.printSummary(); // Log detallado en consola
+        
+        // ========== LIMPIAR TIMEOUTS ==========
+        conversationTimeouts.forEach((timeout, id) => {
+          clearTimeout(timeout);
+        });
+        conversationTimeouts.clear();
+        console.log(`   🧹 Timeouts limpiados (${conversations.length} conversaciones)`);
+        // =======================================
         
         onProgress({ message: "\n🏁 AUDITORÍA COMPLETA - Todos los resultados procesados." });
         console.log('🔥🔥🔥 Llamando a onAllComplete() para cambiar estado a REPORT_READY...');

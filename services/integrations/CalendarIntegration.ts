@@ -137,6 +137,44 @@ export class GoogleCalendarIntegration {
       
       const data = await response.json();
       
+      // 🔥 Obtener snippet de próximos 3 eventos
+      const upcomingEvents: any[] = [];
+      try {
+        const now = new Date().toISOString();
+        const eventsResponse = await fetch(
+          `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now}&maxResults=3&singleEvents=true&orderBy=startTime`,
+          {
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        
+        if (eventsResponse.ok) {
+          const eventsData = await eventsResponse.json();
+          
+          for (const event of (eventsData.items || []).slice(0, 3)) {
+            const start = event.start?.dateTime || event.start?.date;
+            const summary = event.summary || '(Sin título)';
+            
+            upcomingEvents.push({
+              summary: summary.substring(0, 50) + (summary.length > 50 ? '...' : ''),
+              start: new Date(start).toLocaleDateString('es-AR', { 
+                day: '2-digit', 
+                month: '2-digit', 
+                year: 'numeric',
+                hour: event.start?.dateTime ? '2-digit' : undefined,
+                minute: event.start?.dateTime ? '2-digit' : undefined
+              }),
+              attendees: event.attendees?.length || 0
+            });
+          }
+        }
+      } catch (eventsError) {
+        console.warn('No se pudieron cargar eventos próximos:', eventsError);
+      }
+      
       console.log(`📅 [Calendar] Conexión exitosa. Calendario: ${data.summary}`);
       
       return {
@@ -145,7 +183,8 @@ export class GoogleCalendarIntegration {
         details: {
           calendarId: data.id,
           summary: data.summary,
-          timeZone: data.timeZone
+          timeZone: data.timeZone,
+          upcomingEvents: upcomingEvents.length > 0 ? upcomingEvents : undefined
         }
       };
       

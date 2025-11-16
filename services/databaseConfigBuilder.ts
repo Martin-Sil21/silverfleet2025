@@ -108,6 +108,33 @@ export function buildDatabaseConfig(
     return { config: null, warnings };
   }
   
+  // 🔥 DEBUG: Mostrar qué key se está usando
+  if (credData.url) {
+    console.log(`   🔑 URL: ${credData.url}`);
+  }
+  if (credData.key) {
+    const keyStart = credData.key.substring(0, 20);
+    const isServiceRole = credData.key.startsWith('eyJ');
+    console.log(`   🔑 Key (primeros 20 chars): ${keyStart}...`);
+    console.log(`   🔑 Key tipo: ${isServiceRole ? '✅ JWT (service_role)' : '❌ NO JWT (probablemente anon)'}`);
+  }
+  
+  // 🔥 PRIORIZAR tablas seleccionadas por el usuario sobre las auto-detectadas
+  let tablesToUse = detectedTables;
+  
+  console.log(`\n   🔍 [DB Config] Análisis de tablas:`);
+  console.log(`      - Auto-detectadas: ${detectedTables.length} →`, detectedTables);
+  console.log(`      - En credencial: ${credData.selectedTables?.length || 0} →`, credData.selectedTables);
+  
+  if (credData.selectedTables && Array.isArray(credData.selectedTables) && credData.selectedTables.length > 0) {
+    tablesToUse = credData.selectedTables;
+    console.log(`   🎯 ✅ Usando ${tablesToUse.length} tablas SELECCIONADAS por el usuario:`);
+    tablesToUse.forEach((table, idx) => console.log(`      ${idx + 1}. ${table}`));
+  } else {
+    console.log(`   📊 ⚠️  Usando ${tablesToUse.length} tablas AUTO-DETECTADAS:`);
+    tablesToUse.forEach((table, idx) => console.log(`      ${idx + 1}. ${table}`));
+  }
+  
   switch (credential.type as string) {
     case 'supabase':
       if (!credData.url || !credData.key) {
@@ -119,7 +146,7 @@ export function buildDatabaseConfig(
         type: 'supabase',
         url: credData.url,
         key: credData.key,
-        tables: detectedTables
+        tables: tablesToUse
       };
       break;
     
@@ -132,7 +159,7 @@ export function buildDatabaseConfig(
         type: 'airtable',
         url: `https://api.airtable.com/v0/${credData.baseId}`,
         key: credData.apiKey,
-        tables: detectedTables
+        tables: tablesToUse
       };
       break;
     
@@ -141,7 +168,7 @@ export function buildDatabaseConfig(
         type: 'google-sheets',
         url: '', // Google Sheets API uses different URL structure
         key: '', // OAuth token would go here
-        tables: detectedTables
+        tables: tablesToUse
       };
       warnings.push('Google Sheets database auditing requires additional OAuth setup');
       break;

@@ -3,6 +3,15 @@
  * Detecta automáticamente qué campos usar para filtrar en cada tabla
  */
 
+// 🔥 ALIASES: Mapeo de campos comunes entre payload y BD
+const FIELD_ALIASES: Record<string, string[]> = {
+  'session_id': ['sessionId', 'session', 'conversationId', 'conversation_id', 'telefono', 'from', 'phone', 'tel'],
+  'user_id': ['userId', 'user', 'from', 'userName'],
+  'conversation_id': ['conversationId', 'conversation', 'sessionId', 'session_id', 'chatId', 'chat_id'],
+  'telefono': ['phone', 'telephone', 'tel', 'from', 'numero', 'session_id', 'sessionId'],
+  'from': ['telefono', 'phone', 'session_id', 'sessionId', 'numero']
+};
+
 export interface DatabaseTableMapping {
   table: string;
   filterField: string; // Campo que se usa para filtrar (ej: "session_id", "telefono")
@@ -13,6 +22,8 @@ export interface DatabaseTableMapping {
 export interface WorkflowDatabaseInfo {
   mappings: DatabaseTableMapping[];
   tables: string[];
+  unmappedNodes?: Array<{ nodeName: string; nodeType: string; reason: string }>; // 🔥 NUEVO: Nodos que no se pudieron mapear
+  warnings?: string[]; // 🔥 NUEVO: Advertencias generales
 }
 
 /**
@@ -21,12 +32,14 @@ export interface WorkflowDatabaseInfo {
 export function analyzeWorkflowDatabases(workflowNodes: any[]): WorkflowDatabaseInfo {
   const mappings: DatabaseTableMapping[] = [];
   const tablesSet = new Set<string>();
+  const unmappedNodes: Array<{ nodeName: string; nodeType: string; reason: string }> = []; // 🔥 NUEVO
+  const warnings: string[] = []; // 🔥 NUEVO
   
   console.log(`\n🔍 [Workflow Analyzer] Analizando ${workflowNodes.length} nodos del workflow...`);
   
   if (!workflowNodes || workflowNodes.length === 0) {
     console.error(`   ❌ No se proporcionaron nodos del workflow`);
-    return { mappings: [], tables: [] };
+    return { mappings: [], tables: [], unmappedNodes: [], warnings: ['No se proporcionaron nodos del workflow'] };
   }
   
   for (const node of workflowNodes) {
@@ -37,27 +50,26 @@ export function analyzeWorkflowDatabases(workflowNodes: any[]): WorkflowDatabase
       console.log(`      ✅ Nodo de Supabase detectado!`);
       const params = node.parameters || {};
       
-      // Buscar tabla en diferentes ubicaciones posibles
-      const table = params.table || 
-                    params.tableName || 
-                    params.tableId ||
-                    params.resource ||
-                    (params.operation?.table) ||
-                    null;
-      
-      // También buscar en todo el JSON por strings que parezcan nombres de tabla
-      const nodeStr = JSON.stringify(params).toLowerCase();
-      const tableMatches = nodeStr.match(/"(?:table|tablename|tableid)":\s*"([^"]+)"/i);
-      const detectedTable = table || (tableMatches ? tableMatches[1] : null);
+      // 🔥 NUEVO: Usar búsqueda exhaustiva
+      const detectedTable = extractTableNameExhaustive(node);
       
       if (!detectedTable) {
-        console.log(`      ⚠️ Sin tabla detectada`);
-        console.log(`      Params completos:`, JSON.stringify(params, null, 2).substring(0, 500));
-        continue;
+        console.warn(`\n      ⚠️⚠️⚠️ ADVERTENCIA: No se detectó tabla en nodo "${node.name}"`);
+        console.warn(`      Estructura del nodo (primeros 800 chars):`, JSON.stringify(params, null, 2).substring(0, 800));
+        console.warn(`      Este nodo NO será monitoreado en la auditoría de BD`);
+        console.warn(`      👉 ACCIÓN RECOMENDADA: Especifica la tabla manualmente en la UI\n`);
+        
+        // 🔥 NO hacer continue, registrar el nodo como "requiere atención"
+        unmappedNodes.push({
+          nodeName: node.name,
+          nodeType: node.type,
+          reason: 'No se pudo detectar tabla automáticamente'
+        });
+        continue; // Ahora sí hacemos continue pero después de registrar
       }
       
       tablesSet.add(detectedTable);
-      console.log(`      📊 Tabla: ${detectedTable}`);
+      console.log(`      📊 Tabla detectada: ${detectedTable}`);
       
       // 🔥 DEBUG: Ver estructura completa de params para diagnosticar
       console.log(`      📦 Params del nodo:`, JSON.stringify(params, null, 2));
@@ -146,7 +158,115 @@ export function analyzeWorkflowDatabases(workflowNodes: any[]): WorkflowDatabase
         }
       }
       
-      // Formato 4: Búsqueda exhaustiva en el JSON completo del nodo
+      // 🔥 FORMATO 4: additionalFields.filter (algunos nodos de Supabase)
+      console.log(`      🔍 Verificando additionalFields.filter:`, params.additionalFields?.filter);
+      if (!filtersFound && params.additionalFields?.filter) {
+        console.log(`      ✅ ENTRÓ al bloque additionalFields.filter`);
+        
+        const filter = params.additionalFields.filter;
+        
+        // Puede ser string "field=value" o objeto { field: "value" }
+        if (typeof filter === 'string') {
+          const match = filter.match(/(\w+)\s*=\s*(.+)/);
+          if (match) {
+            const filterField = match[1];
+            const sourceValue = match[2];
+            const sourceField = extractFieldName(sourceValue);
+            
+            if (sourceField) {
+              console.log(`      🎯 Filtro detectado (string filter): ${filterField} = ${sourceField}`);
+              mappings.push({ table: detectedTable, filterField, sourceField });
+              filtersFound = true;
+            }
+          }
+        } else if (typeof filter === 'object' && filter !== null) {
+          for (const [key, value] of Object.entries(filter)) {
+            const sourceField = extractFieldName(String(value));
+            if (sourceField) {
+              console.log(`      🎯 Filtro detectado (object filter): ${key} = ${sourceField}`);
+              mappings.push({ table: detectedTable, filterField: key, sourceField });
+              filtersFound = true;
+            }
+          }
+        }
+      }
+      
+      // 🔥 FORMATO 5: params.where (condiciones WHERE directas)
+      console.log(`      🔍 Verificando params.where:`, params.where);
+      if (!filtersFound && params.where && typeof params.where === 'object') {
+        console.log(`      ✅ ENTRÓ al bloque params.where`);
+        
+        for (const [key, value] of Object.entries(params.where)) {
+          if (typeof value === 'string') {
+            const sourceField = extractFieldName(value);
+            if (sourceField) {
+              console.log(`      🎯 Filtro detectado (where clause): ${key} = ${sourceField}`);
+              mappings.push({ table: detectedTable, filterField: key, sourceField });
+              filtersFound = true;
+            }
+          }
+        }
+      }
+      
+      // 🔥 FORMATO 6: params.eq / params.ilike / params.like (operadores directos)
+      const operatorParams = ['eq', 'ilike', 'like', 'neq', 'gt', 'lt', 'gte', 'lte'];
+      for (const op of operatorParams) {
+        if (!filtersFound && params[op] && typeof params[op] === 'object') {
+          console.log(`      ✅ ENTRÓ al bloque params.${op}`);
+          
+          for (const [key, value] of Object.entries(params[op])) {
+            if (typeof value === 'string') {
+              const sourceField = extractFieldName(value);
+              if (sourceField) {
+                console.log(`      🎯 Filtro detectado (${op} operator): ${key} ${op} ${sourceField}`);
+                mappings.push({ table: detectedTable, filterField: key, sourceField, operator: op });
+                filtersFound = true;
+              }
+            }
+          }
+        }
+      }
+      
+      // 🔥 FORMATO 7: SELECT ... WHERE en additionalFields.queryString
+      console.log(`      🔍 Verificando additionalFields.queryString:`, params.additionalFields?.queryString);
+      if (!filtersFound && params.additionalFields?.queryString) {
+        console.log(`      ✅ ENTRÓ al bloque queryString`);
+        
+        const queryString = params.additionalFields.queryString;
+        
+        // Parsear query string: "field1=value1&field2=value2"
+        const pairs = queryString.split('&');
+        for (const pair of pairs) {
+          const [key, value] = pair.split('=');
+          if (key && value) {
+            const sourceField = extractFieldName(decodeURIComponent(value));
+            if (sourceField) {
+              console.log(`      🎯 Filtro detectado (queryString): ${key} = ${sourceField}`);
+              mappings.push({ table: detectedTable, filterField: key, sourceField });
+              filtersFound = true;
+            }
+          }
+        }
+      }
+      
+      // 🔥 FORMATO 8: params.match (filtros de Supabase con match())
+      console.log(`      🔍 Verificando params.match:`, params.match);
+      if (!filtersFound && params.match && typeof params.match === 'object') {
+        console.log(`      ✅ ENTRÓ al bloque params.match`);
+        
+        for (const [key, value] of Object.entries(params.match)) {
+          if (typeof value === 'string') {
+            const sourceField = extractFieldName(value);
+            if (sourceField) {
+              console.log(`      🎯 Filtro detectado (match): ${key} = ${sourceField}`);
+              mappings.push({ table: detectedTable, filterField: key, sourceField, operator: 'eq' });
+              filtersFound = true;
+            }
+          }
+        }
+      }
+      
+      // Formato 9: Búsqueda exhaustiva en el JSON completo del nodo
       // Buscar patrones como "session_id": "={{$json.sessionId}}"
       console.log(`      🔍 filtersFound hasta ahora: ${filtersFound}`);
       if (!filtersFound) {
@@ -235,14 +355,66 @@ export function analyzeWorkflowDatabases(workflowNodes: any[]): WorkflowDatabase
     mappings.forEach((m, i) => {
       console.log(`         ${i + 1}. ${m.table}.${m.filterField} ${m.operator || 'eq'} ${m.sourceField}`);
     });
+    
+    // 🔥 NUEVO: Detectar tablas sin mappings
+    const tablesWithMappings = new Set(mappings.map(m => m.table));
+    const tablesWithoutMappings = Array.from(tablesSet).filter(t => !tablesWithMappings.has(t));
+    
+    if (tablesWithoutMappings.length > 0) {
+      console.warn(`\n      ⚠️ ATENCIÓN: ${tablesWithoutMappings.length} tabla(s) detectadas SIN filtros:`);
+      tablesWithoutMappings.forEach((table, idx) => {
+        console.warn(`         ${idx + 1}. "${table}" - NO tiene filtros configurados`);
+      });
+      console.warn(`      💡 Estas tablas traerán TODOS los registros (puede ser lento)`);
+      console.warn(`      👉 Considera configurar filtros manualmente para estas tablas\n`);
+      warnings.push(`${tablesWithoutMappings.length} tabla(s) sin filtros: ${tablesWithoutMappings.join(', ')}`);
+    }
   } else {
     console.log(`      ⚠️ NO SE DETECTARON MAPPINGS - Auditoría usará auto-detect`);
+    warnings.push('No se detectaron mappings automáticamente');
+    
+    if (tablesSet.size > 0) {
+      console.warn(`\n      ⚠️ Se detectaron ${tablesSet.size} tabla(s) pero SIN filtros:`);
+      Array.from(tablesSet).forEach((table, idx) => {
+        console.warn(`         ${idx + 1}. "${table}" - Sin filtros`);
+      });
+      console.warn(`      💡 El auto-detect intentará encontrar campos comunes (session_id, etc.)`);
+      console.warn(`      👉 Si falla, traerá TODAS las filas de estas tablas\n`);
+    }
+  }
+  
+  // 🔥 NUEVO: Reportar nodos sin mapear
+  if (unmappedNodes.length > 0) {
+    console.warn(`\n   ⚠️⚠️⚠️ ATENCIÓN: ${unmappedNodes.length} nodo(s) de BD NO fueron mapeados:`);
+    unmappedNodes.forEach((node, idx) => {
+      console.warn(`      ${idx + 1}. ${node.nodeName} (${node.nodeType})`);
+      console.warn(`         Razón: ${node.reason}`);
+    });
+    console.warn(`   👉 Esto puede causar que la auditoría NO detecte cambios en estas tablas\n`);
+    warnings.push(`${unmappedNodes.length} nodo(s) de BD no pudieron ser mapeados automáticamente`);
+  }
+  
+  // 🔥 NUEVO: Advertencia crítica si NO se detectó NADA
+  if (tablesSet.size === 0) {
+    console.error(`\n   🚨🚨🚨 PROBLEMA CRÍTICO 🚨🚨🚨`);
+    console.error(`   NO se detectaron TABLAS en el workflow`);
+    console.error(`   La auditoría de BD NO funcionará`);
+    console.error(`\n   💡 POSIBLES CAUSAS:`);
+    console.error(`      1. El workflow no tiene nodos de BD (Supabase, Postgres, etc.)`);
+    console.error(`      2. Los nodos usan un formato no soportado`);
+    console.error(`      3. Los nombres de tabla están en variables/expresiones complejas`);
+    console.error(`\n   🛠️ SOLUCIONES:`);
+    console.error(`      1. Verifica que el workflow tenga nodos de Supabase o Postgres`);
+    console.error(`      2. Especifica las tablas manualmente en la configuración`);
+    console.error(`      3. Comparte el archivo .json del workflow para análisis\n`);
+    warnings.push('CRÍTICO: No se detectaron tablas en el workflow');
   }
   
   return {
-
     mappings,
-    tables: Array.from(tablesSet)
+    tables: Array.from(tablesSet),
+    unmappedNodes,
+    warnings
   };
 }
 
@@ -371,6 +543,17 @@ export function getFilterValue(
     return String(value);
   }
   
+  // 🔥 NUEVO: Intentar aliases del filterField (ej: session_id → sessionId, conversationId, etc.)
+  const filterFieldLower = mapping.filterField.toLowerCase();
+  const aliases = FIELD_ALIASES[filterFieldLower] || FIELD_ALIASES[mapping.filterField] || [];
+  
+  for (const alias of aliases) {
+    if (payload[alias] !== undefined && payload[alias] !== null) {
+      console.log(`      🔄 Usando alias "${alias}" para campo "${mapping.filterField}"`);
+      return String(payload[alias]);
+    }
+  }
+  
   // Intentar variaciones del nombre (camelCase, snake_case, etc.)
   const variations = [
     mapping.sourceField,
@@ -400,5 +583,142 @@ function toSnakeCase(str: string): string {
  */
 function toCamelCase(str: string): string {
   return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+/**
+ * 🔥 NUEVO: Busca nombre de tabla de manera EXHAUSTIVA en el nodo
+ * Intenta múltiples estrategias hasta encontrar la tabla
+ */
+function extractTableNameExhaustive(node: any): string | null {
+  console.log(`      🔍 Búsqueda exhaustiva de tabla en nodo "${node.name}"`);
+  
+  const params = node.parameters || {};
+  
+  // ESTRATEGIA 1: Ubicaciones conocidas en params
+  const knownLocations = [
+    params.table,
+    params.tableName,
+    params.tableId,
+    params.resource,
+    params.operation?.table,
+    params.operation?.resource,
+    params.options?.table,
+    params.options?.resource
+  ];
+  
+  for (const loc of knownLocations) {
+    if (loc && typeof loc === 'string' && loc.trim().length > 0) {
+      console.log(`      ✅ Tabla encontrada (ubicación conocida): "${loc}"`);
+      return loc.trim();
+    }
+  }
+  
+  // ESTRATEGIA 2: Buscar en additionalFields.queryName (queries SQL raw)
+  if (params.additionalFields?.queryName) {
+    const sqlQuery = params.additionalFields.queryName;
+    const match = sqlQuery.match(/FROM\s+([`"])?(\w+)\1/i);
+    if (match && match[2]) {
+      console.log(`      ✅ Tabla encontrada (SQL query): "${match[2]}"`);
+      return match[2];
+    }
+  }
+  
+  // ESTRATEGIA 3: Buscar en filters.conditions
+  if (params.filters?.conditions && Array.isArray(params.filters.conditions)) {
+    const firstCondition = params.filters.conditions[0];
+    if (firstCondition?.table) {
+      console.log(`      ✅ Tabla encontrada (filters.conditions): "${firstCondition.table}"`);
+      return firstCondition.table;
+    }
+  }
+  
+  // ESTRATEGIA 4: Búsqueda en JSON RAW con múltiples patrones
+  const nodeStr = JSON.stringify(node);
+  
+  // Patrón 1: "table": "nombre_tabla"
+  const pattern1 = /"(?:table|tableName|tableId|resource)":\s*"([a-zA-Z_][a-zA-Z0-9_]*)"/gi;
+  let match = pattern1.exec(nodeStr);
+  if (match && match[1]) {
+    console.log(`      ✅ Tabla encontrada (patrón JSON "table"): "${match[1]}"`);
+    return match[1];
+  }
+  
+  // Patrón 2: FROM table_name (en queries SQL embebidos)
+  const pattern2 = /FROM\s+([`"])?([a-zA-Z_][a-zA-Z0-9_]*)\1/gi;
+  match = pattern2.exec(nodeStr);
+  if (match && match[2]) {
+    console.log(`      ✅ Tabla encontrada (SQL FROM): "${match[2]}"`);
+    return match[2];
+  }
+  
+  // Patrón 3: .from('table_name') o .from("table_name") (Supabase client syntax)
+  const pattern3 = /\.from\s*\(\s*['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]\s*\)/gi;
+  match = pattern3.exec(nodeStr);
+  if (match && match[1]) {
+    console.log(`      ✅ Tabla encontrada (.from() syntax): "${match[1]}"`);
+    return match[1];
+  }
+  
+  // ESTRATEGIA 5: Heurística - buscar palabras que parezcan nombres de tabla
+  // Solo si TODO lo demás falló y es un nodo de BD
+  if (node.type?.includes('supabase') || node.type?.includes('postgres')) {
+    const commonTableWords = [
+      'usuarios', 'users', 'clientes', 'customers', 
+      'pedidos', 'orders', 'productos', 'products',
+      'mensajes', 'messages', 'historico', 'history',
+      'conversaciones', 'conversations', 'sesiones', 'sessions',
+      'chats', 'contactos', 'contacts'
+    ];
+    
+    const nodeLower = nodeStr.toLowerCase();
+    for (const word of commonTableWords) {
+      if (nodeLower.includes(`"${word}"`)) {
+        console.log(`      💡 Posible tabla detectada (heurística): "${word}"`);
+        console.log(`      ⚠️ ADVERTENCIA: Detección por heurística, puede ser incorrecta`);
+        return word;
+      }
+    }
+  }
+  
+  console.log(`      ❌ No se pudo detectar tabla con ningún método`);
+  return null;
+}
+
+/**
+ * Extrae nombre de tabla de ubicaciones menos obvias en params
+ * @deprecated Usar extractTableNameExhaustive() en su lugar
+ */
+function extractTableFromParams(params: any): string | null {
+  if (!params) return null;
+  
+  // 1. Buscar en additionalFields.queryName (queries SQL raw)
+  if (params.additionalFields?.queryName) {
+    const sqlQuery = params.additionalFields.queryName;
+    const match = sqlQuery.match(/FROM\s+([`"])?(\w+)\1/i);
+    if (match) {
+      console.log(`      💡 Tabla extraída de SQL query: ${match[2]}`);
+      return match[2];
+    }
+  }
+  
+  // 2. Buscar en filters.conditions (puede tener metadata de tabla)
+  if (params.filters?.conditions && Array.isArray(params.filters.conditions)) {
+    const firstCondition = params.filters.conditions[0];
+    if (firstCondition?.table) {
+      console.log(`      💡 Tabla extraída de filters.conditions: ${firstCondition.table}`);
+      return firstCondition.table;
+    }
+  }
+  
+  // 3. Buscar en toda la estructura JSON (último recurso)
+  const paramsStr = JSON.stringify(params);
+  const tablePattern = /"(?:from|table)"\s*:\s*"(\w+)"/i;
+  const match = paramsStr.match(tablePattern);
+  if (match) {
+    console.log(`      💡 Tabla extraída de JSON search: ${match[1]}`);
+    return match[1];
+  }
+  
+  return null;
 }
 

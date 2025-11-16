@@ -68,29 +68,7 @@ async function testSupabase(data: any, knownTables?: string[]): Promise<TestResu
       return await fetchTableDetails(supabase, knownTables);
     }
     
-    // Estrategia 1: Intentar obtener el esquema completo usando RPC o una query directa
-    // Esto funciona mejor con service_role key
-    const { data: schemaData, error: schemaError } = await supabase.rpc('get_schema', {}).select();
-    
-    if (!schemaError && schemaData) {
-      // Si tenemos acceso al esquema completo
-      const tables = schemaData.map((t: any) => t.table_name);
-      return await fetchTableDetails(supabase, tables);
-    }
-    
-    // Estrategia 2: Intentar listar tablas conocidas o usar un endpoint público
-    // Hacer una query directa a Postgres para obtener tablas
-    const { data: postgresData, error: postgresError } = await supabase
-      .from('pg_tables')
-      .select('tablename')
-      .eq('schemaname', 'public');
-    
-    if (!postgresError && postgresData && postgresData.length > 0) {
-      const tables = postgresData.map((t: any) => t.tablename);
-      return await fetchTableDetails(supabase, tables);
-    }
-    
-    // Estrategia 3: Usar el API REST de Supabase para descubrir tablas
+    // Usar el API REST de Supabase para descubrir tablas
     // Hacer una petición HTTP directa al endpoint de Supabase
     try {
       const response = await fetch(`${data.url}/rest/v1/`, {
@@ -112,22 +90,25 @@ async function testSupabase(data: any, knownTables?: string[]): Promise<TestResu
           // Extraer nombres de tablas del schema OpenAPI
           if (openApiSchema.definitions) {
             Object.keys(openApiSchema.definitions).forEach(key => {
-              if (!key.startsWith('pg_') && !key.includes('information_schema')) {
+              if (!key.startsWith('pg_') && !key.includes('information_schema') && !key.startsWith('_')) {
                 tableNames.push(key);
               }
             });
           }
           
           if (tableNames.length > 0) {
+            console.log(`✅ Discovered ${tableNames.length} tables from OpenAPI schema`);
             return await fetchTableDetails(supabase, tableNames);
           }
         }
+      } else {
+        console.warn(`⚠️ REST API returned ${response.status}: ${response.statusText}`);
       }
     } catch (fetchError) {
-      console.log('Could not fetch schema via REST API:', fetchError);
+      console.warn('⚠️ Could not fetch schema via REST API:', fetchError);
     }
 
-    // Si todo falla, al menos confirmar que la conexión funciona
+    // Si no pudimos listar tablas, al menos confirmar que la conexión funciona
     return { 
       success: true, 
       message: '✅ Connection successful! (Unable to list tables - may need service_role key)',
@@ -141,9 +122,9 @@ async function testSupabase(data: any, knownTables?: string[]): Promise<TestResu
 
 async function fetchTableDetails(supabase: any, tableNames: string[]): Promise<TestResult> {
   const tables: TableInfo[] = [];
-  const tablesToCheck = tableNames.slice(0, 8); // Limitar a 8 tablas
   
-  for (const tableName of tablesToCheck) {
+  // No limitar tablas - mostrar todas las detectadas
+  for (const tableName of tableNames) {
     try {
       // Contar registros
       const { count, error: countError } = await supabase

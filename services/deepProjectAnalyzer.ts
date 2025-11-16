@@ -23,6 +23,7 @@ import { GoogleGenAI } from '@google/genai';
 import { costTracker } from './costTracker';
 import { analyzeDatabaseSchemas as parseSchemas } from './advancedSchemaParser';
 import { detectIntegrations } from './integrationMapper';
+import { detectAllAgentsExhaustive, convertToCodeAgents } from './exhaustiveAgentDetector';
 import {
   ParsedCodeProject,
   CodeAgentComponent,
@@ -282,13 +283,23 @@ async function detectAgentsDeep(
   
   const agents: CodeAgentComponent[] = [];
   
-  // PASO 1: Detectar agentes EXPLÍCITOS (con frameworks conocidos)
-  const explicitAgents = detectExplicitAgents(files);
-  agents.push(...explicitAgents);
+  // PASO 0: 🔥 ANÁLISIS EXHAUSTIVO - Analiza TODOS los archivos línea por línea
+  console.log('🔬 Running exhaustive analysis on ALL files...');
+  const exhaustiveAgents = detectAllAgentsExhaustive(files);
+  const exhaustiveCodeAgents = convertToCodeAgents(exhaustiveAgents);
+  agents.push(...exhaustiveCodeAgents);
   
-  // PASO 2: Detectar agentes IMPLÍCITOS (lógica de negocio)
-  const implicitAgents = await detectImplicitAgents(files, language);
-  agents.push(...implicitAgents);
+  console.log(`✅ Exhaustive analysis found ${exhaustiveCodeAgents.length} agents`);
+  
+  // PASO 1: Detectar agentes EXPLÍCITOS (con frameworks conocidos) - DEPRECATED
+  // Ya no usamos esto porque el análisis exhaustivo es más completo
+  // const explicitAgents = detectExplicitAgents(files);
+  // agents.push(...explicitAgents);
+  
+  // PASO 2: Detectar agentes IMPLÍCITOS (lógica de negocio) - SKIP para evitar falsos positivos
+  // El análisis exhaustivo ya encuentra todo lo importante
+  // const implicitAgents = await detectImplicitAgents(files, language);
+  // agents.push(...implicitAgents);
   
   // PASO 3: Deduplicar agentes (por systemPrompt y filePath)
   const uniqueAgents = deduplicateAgents(agents);
@@ -296,7 +307,7 @@ async function detectAgentsDeep(
   // PASO 4: Enriquecer con análisis semántico usando Gemini
   const enrichedAgents = await enrichAgentsWithAI(uniqueAgents, files, language);
   
-  console.log(`✅ Detected ${enrichedAgents.length} agents (${explicitAgents.length} explicit, ${implicitAgents.length} implicit, ${agents.length - uniqueAgents.length} duplicates removed)`);
+  console.log(`✅ Detected ${enrichedAgents.length} agents (${exhaustiveCodeAgents.length} from exhaustive analysis, ${agents.length - uniqueAgents.length} duplicates removed)`);
   
   return enrichedAgents;
 }
@@ -354,12 +365,25 @@ function detectExplicitAgents(files: ProjectFile[]): CodeAgentComponent[] {
     
     // 🔥 Detectar Google Gemini agents (PRIORIDAD ALTA)
     if (content.includes('@google/genai') || content.includes('GoogleGenAI') || content.includes('gemini')) {
+      // Intentar detectar múltiples agentes en el mismo archivo
+      const multipleAgents = extractMultipleGeminiAgents(file);
+      
+      if (multipleAgents.length > 0) {
+        agents.push(...multipleAgents); // Agregar TODOS los agentes encontrados
+        processedFiles.add(file.path);
+        agentDetected = true;
+        console.log(`   ✅ Found ${multipleAgents.length} Gemini agents in ${file.name}`);
+        continue; // ✅ NO hacer fallback si ya detectó agentes
+      }
+      
+      // Fallback SOLO si no detectó ninguno con el método múltiple
+      console.log(`   ⚠️  extractMultipleGeminiAgents found 0 agents in ${file.name}, trying basic detection...`);
       const agent = extractGeminiAgent(file);
       if (agent) {
         agents.push(agent);
         processedFiles.add(file.path);
         agentDetected = true;
-        continue; // Saltar al siguiente archivo
+        continue;
       }
     }
     
@@ -489,7 +513,6 @@ function extractAnthropicAgent(file: ProjectFile): CodeAgentComponent | null {
 // 🔥 NUEVO: Detectar Google Gemini agents
 function extractGeminiAgent(file: ProjectFile): CodeAgentComponent | null {
   const content = file.content;
-  const systemPrompt = extractSystemPromptFromFile(content);
   
   // Buscar llamadas a Gemini
   const hasGeminiCall = content.includes('generateContent') || 
@@ -498,8 +521,19 @@ function extractGeminiAgent(file: ProjectFile): CodeAgentComponent | null {
   
   if (!hasGeminiCall) return null;
   
-  // 🔥 FILTRO: Si no hay prompt útil (>50 chars) ni tools, NO es un agente
+  // 🔥 NUEVO: Detectar si hay MÚLTIPLES agentes en el mismo archivo (métodos de clase)
+  const multipleAgents = extractMultipleGeminiAgents(file);
+  if (multipleAgents.length > 1) {
+    // Devolver el primero y marcar que hay más
+    // (la función principal detectExplicitAgents debería llamar a extractMultipleGeminiAgents directamente)
+    return multipleAgents[0];
+  }
+  
+  // Detección original para archivos con un solo agente
+  const systemPrompt = extractSystemPromptFromFile(content);
   const tools = extractToolsFromGeneric(content);
+  
+  // 🔥 FILTRO: Si no hay prompt útil (>50 chars) ni tools, NO es un agente
   if ((!systemPrompt || systemPrompt.length < 50) && tools.length === 0) {
     return null; // Es solo una config de Gemini, no un agente
   }
@@ -536,8 +570,6 @@ function extractGeminiAgent(file: ProjectFile): CodeAgentComponent | null {
     agentName = `Gemini Agent (${folder})`;
   }
   
-  // tools ya fue declarado arriba para el filtro
-  
   return {
     type: 'agent',
     name: agentName,
@@ -550,6 +582,148 @@ function extractGeminiAgent(file: ProjectFile): CodeAgentComponent | null {
     confidence: 0.9,
     agentDetectionType: AgentDetectionType.EXPLICIT,
   };
+}
+
+/**
+ * 🔥 NUEVO: Detectar MÚLTIPLES agentes Gemini en un mismo archivo
+ * (Caso: Métodos de clase como executePlanner, executeCommercialAdvisor)
+ */
+function extractMultipleGeminiAgents(file: ProjectFile): CodeAgentComponent[] {
+  const agents: CodeAgentComponent[] = [];
+  const content = file.content;
+  
+  // Buscar cada método que use generateContent
+  const methods: Array<{name: string; startLine: number; content: string}> = [];
+  
+  // Buscar métodos: private/public/protected async METHOD_NAME o async METHOD_NAME
+  const methodPattern = /(?:private|public|protected)?\s*async\s+(\w+)\s*\(/g;
+  let methodMatch;
+  
+  console.log(`   🔎 Searching for async methods in ${file.name}...`);
+  
+  while ((methodMatch = methodPattern.exec(content)) !== null) {
+    const methodName = methodMatch[1];
+    const startIndex = methodMatch.index;
+    
+    console.log(`   📌 Found async method: ${methodName}()`);
+    
+    // Buscar el bloque completo del método
+    let braceCount = 0;
+    let inMethod = false;
+    let methodContent = '';
+    let foundStart = false;
+    
+    for (let i = startIndex; i < content.length; i++) {
+      const char = content[i];
+      
+      if (char === '{') {
+        braceCount++;
+        inMethod = true;
+        foundStart = true;
+      }
+      
+      if (foundStart) {
+        methodContent += char;
+      }
+      
+      if (char === '}') {
+        braceCount--;
+        if (braceCount === 0 && inMethod) {
+          break;
+        }
+      }
+    }
+    
+    // Solo si el método usa generateContent
+    if (methodContent.includes('generateContent')) {
+      console.log(`   ✅ ${methodName}() uses generateContent`);
+      methods.push({
+        name: methodName,
+        startLine: content.substring(0, startIndex).split('\n').length,
+        content: methodContent
+      });
+    } else {
+      console.log(`   ⏭️  ${methodName}() doesn't use generateContent`);
+    }
+  }
+  
+  console.log(`   🔍 Found ${methods.length} methods with generateContent in ${file.name}`);
+  
+  // Crear un agente por cada método
+  for (const method of methods) {
+    // Extraer system prompt del método (multiline) - buscar el template string más largo
+    const allPrompts = method.content.matchAll(/`([\s\S]{50,}?)`/g);
+    let longestPrompt = '';
+    
+    for (const match of allPrompts) {
+      if (match[1].length > longestPrompt.length) {
+        longestPrompt = match[1];
+      }
+    }
+    
+    const systemPrompt = longestPrompt.trim();
+    
+    console.log(`   📝 Method ${method.name}: prompt length = ${systemPrompt.length}`);
+    
+    if (!systemPrompt || systemPrompt.length < 100) {
+      console.log(`   ⏭️  Skipping ${method.name} - prompt too short (${systemPrompt.length} chars)`);
+      continue;
+    }
+    
+    // 🔥 FILTRO: Verificar que sea un agente conversacional, no servicio de utilidad
+    // Buscar palabras clave de agente conversacional EN EL PROMPT
+    const isConversationalAgent = 
+      /agent[eo]?\s*\d+|sos el agente|you are (an? )?(agent|assistant)|planificador|asesor|validator|commercial|advisor/i.test(systemPrompt);
+    
+    // Excluir explícitamente servicios de utilidad
+    const isUtilityService = 
+      /analiza.*imagen|describe.*image|process.*document|extract.*text|media.*processing/i.test(systemPrompt) ||
+      /image|document|file|media/.test(method.name) && !/agent/i.test(systemPrompt);
+    
+    if (isUtilityService) {
+      console.log(`   ⏭️  Skipping ${method.name} - utility service detected`);
+      continue;
+    }
+    
+    if (!isConversationalAgent) {
+      console.log(`   ⏭️  Skipping ${method.name} - not a conversational agent (no agent keywords found)`);
+      continue;
+    }
+    
+    // Buscar descripción del agente en el prompt o comentarios
+    let agentName = method.name.replace(/execute|run|process/i, '').trim();
+    
+    // Buscar "Agent 1", "Agente 2", etc. en el prompt
+    const agentMatch = systemPrompt.match(/(?:Agent|AGENTE|Sos el Agente)\s*([12])[:\s-]+([^\n.]{1,100})/i);
+    if (agentMatch) {
+      const number = agentMatch[1];
+      const desc = agentMatch[2].trim().replace(/[=:=]/g, '').trim();
+      agentName = `Agent ${number}: ${desc}`;
+    } else {
+      // Usar nombre del método
+      agentName = method.name.replace(/([A-Z])/g, ' $1').trim();
+    }
+    
+    console.log(`   ✅ Detected agent: ${agentName}`);
+    
+    // Extraer tools del método
+    const tools = extractToolsFromGeneric(method.content);
+    
+    agents.push({
+      type: 'agent',
+      name: agentName,
+      filePath: file.path,
+      systemPrompt: systemPrompt.substring(0, 500), // Primeros 500 chars
+      description: `Gemini agent (${method.name} method)`,
+      imports: extractImports(content),
+      framework: 'Google Gemini',
+      tools,
+      confidence: 0.95,
+      agentDetectionType: AgentDetectionType.EXPLICIT,
+    });
+  }
+  
+  return agents;
 }
 
 // 🔥 Helper para sanitizar nombres de agentes
@@ -795,6 +969,28 @@ async function detectImplicitAgents(
   console.log(`   Found ${handlerFiles.length} potential handler files`);
   
   for (const file of handlerFiles) {
+    const content = file.content;
+    
+    // 🔥 FILTRO: NO detectar como agente implícito si ya tiene agentes explícitos detectados
+    // (ej: si el archivo ya tiene agentes Gemini, no crear agentes implícitos adicionales)
+    const hasExplicitAI = content.includes('generateContent') || 
+                         content.includes('chat.completions') ||
+                         content.includes('messages.create') ||
+                         content.includes('@google/genai') ||
+                         content.includes('langchain');
+    
+    if (hasExplicitAI) {
+      console.log(`   ⏭️  Skipping ${file.name} - already has explicit AI agents`);
+      continue; // Ya se detectó como agente explícito
+    }
+    
+    // 🔥 FILTRO 2: NO detectar servicios de utilidad como "media processing"
+    const isUtilityService = /media|image|file|upload|storage|cache|logger|config/i.test(file.name);
+    if (isUtilityService) {
+      console.log(`   ⏭️  Skipping ${file.name} - utility service, not an agent`);
+      continue;
+    }
+    
     const behaviors = extractBehaviors(file);
     
     if (behaviors.length > 0) {
@@ -1108,19 +1304,28 @@ export async function deepAnalyzeProject(
   // FASE 3: Detectar framework
   const framework = detectFramework(project.allFiles, dependencies);
   
+  // Preparar fileContents para análisis
+  const fileContents = project.allFiles.map(f => ({
+    path: f.path,
+    name: f.name,
+    content: f.content,
+  }));
+  
   // FASE 4: Análisis profundo de agentes
   const agents = await detectAgentsDeep(project.allFiles, language);
+  
+  // FASE 4.5: 🔥 NUEVO - Detectar wrappers de BD y flujo de datos
+  const { detectDatabaseWrappers } = await import('./databaseWrapperDetector');
+  const { wrappers, dataFlows } = detectDatabaseWrappers(
+    fileContents,
+    agents.map(a => ({ name: a.name, filePath: a.filePath }))
+  );
   
   // FASE 5: Análisis de bases de datos
   const databaseSchemas = await analyzeDatabaseSchemas(project.allFiles);
   const databases = summarizeDatabases(databaseSchemas);
   
   // FASE 6: Detectar herramientas y APIs usando integrationMapper
-  const fileContents = project.allFiles.map(f => ({
-    path: f.path,
-    name: f.name,
-    content: f.content,
-  }));
   
   const integrations = await detectIntegrations(fileContents);
   const tools = integrations
@@ -1157,11 +1362,50 @@ export async function deepAnalyzeProject(
     summary: generateSummary(agents, databases, tools, framework),
     apiEndpoints: detectEndpoints(project.allFiles),
     environmentVariables: detectEnvVars(project.allFiles),
+    // 🔥 NUEVO: Análisis profundo con wrappers y flujo de datos
+    deepAnalysis: {
+      hooks: wrappers.map(w => ({
+        name: w.name,
+        filePath: w.filePath,
+        queries: [{
+          table: w.inferredTable || null,
+          queryType: w.operation === 'multiple' ? 'unknown' : w.operation,
+          fields: w.fields
+        }],
+        usedBy: w.usedByAgents,
+        semanticPurpose: inferSemanticPurpose(w.name, w.inferredTable || '')
+      })),
+      databaseQueries: wrappers.map(w => ({
+        functionName: w.name,
+        filePath: w.filePath,
+        table: w.inferredTable || null,
+        queryType: w.operation === 'multiple' ? 'unknown' : w.operation,
+        fields: w.fields,
+        semanticContext: inferSemanticPurpose(w.name, w.inferredTable || '')
+      })),
+      operations: dataFlows.map(df => ({
+        agentName: df.agent,
+        operation: df.operation as any,
+        table: df.table,
+        fields: [],
+        hookOrFunction: df.wrapper,
+        semanticContext: df.operation
+      })),
+      dataFlow: dataFlows.map(df => ({
+        from: df.agent,
+        through: df.wrapper,
+        to: df.table,
+        fields: [],
+        purpose: df.operation
+      })),
+      tables: summarizeTablesFromWrappers(wrappers)
+    }
   };
   
   const duration = (performance.now() - startTime).toFixed(2);
   console.log(`✅ DEEP analysis completed in ${duration}ms`);
   console.log(`   Agents: ${agents.length}, Databases: ${databases.length}, Tools: ${tools.length}, APIs: ${apis.length}`);
+  console.log(`   🔥 DB Wrappers: ${wrappers.length}, Data Flows: ${dataFlows.length}`);
   
   return result;
 }
@@ -1254,6 +1498,92 @@ function calculateConfidence(
   if (tools.length > 0) score += 0.1;
   
   return Math.min(1, score);
+}
+
+/**
+ * 🔥 NUEVO: Infiere el propósito semántico de un wrapper
+ */
+function inferSemanticPurpose(wrapperName: string, tableName: string): string {
+  const combined = `${wrapperName} ${tableName}`.toLowerCase();
+  
+  if (/chat|history|message|conversation/.test(combined)) return 'conversations';
+  if (/price|precio|cost|costo|product|producto/.test(combined)) return 'pricing';
+  if (/user|usuario|customer|cliente/.test(combined)) return 'users';
+  if (/memoria|memory|temporal|state/.test(combined)) return 'state_management';
+  if (/resumen|summary/.test(combined)) return 'summaries';
+  if (/order|pedido|venta|sale/.test(combined)) return 'orders';
+  
+  return 'general';
+}
+
+/**
+ * 🔥 NUEVO: Resume tablas desde wrappers detectados
+ */
+function summarizeTablesFromWrappers(wrappers: any[]): Array<{
+  name: string;
+  operations: Array<{
+    type: 'read' | 'write' | 'delete';
+    usedBy: string[];
+    fields: string[];
+  }>;
+}> {
+  const tablesMap = new Map<string, {
+    name: string;
+    operations: Map<string, { type: 'read' | 'write' | 'delete'; usedBy: Set<string>; fields: Set<string> }>;
+  }>();
+  
+  for (const wrapper of wrappers) {
+    if (!wrapper.inferredTable) continue;
+    
+    if (!tablesMap.has(wrapper.inferredTable)) {
+      tablesMap.set(wrapper.inferredTable, {
+        name: wrapper.inferredTable,
+        operations: new Map()
+      });
+    }
+    
+    const table = tablesMap.get(wrapper.inferredTable)!;
+    
+    // Determinar tipo de operación
+    let opType: 'read' | 'write' | 'delete' = 'read';
+    if (['insert', 'update'].includes(wrapper.operation)) opType = 'write';
+    if (wrapper.operation === 'delete') opType = 'delete';
+    
+    const opKey = opType;
+    
+    if (!table.operations.has(opKey)) {
+      table.operations.set(opKey, {
+        type: opType,
+        usedBy: new Set(),
+        fields: new Set()
+      });
+    }
+    
+    const op = table.operations.get(opKey)!;
+    
+    // Agregar wrapper a usedBy
+    op.usedBy.add(wrapper.name);
+    
+    // Agregar agentes que usan este wrapper
+    for (const agent of wrapper.usedByAgents) {
+      op.usedBy.add(agent);
+    }
+    
+    // Agregar fields
+    for (const field of wrapper.fields) {
+      op.fields.add(field);
+    }
+  }
+  
+  // Convertir a formato final
+  return Array.from(tablesMap.values()).map(table => ({
+    name: table.name,
+    operations: Array.from(table.operations.values()).map(op => ({
+      type: op.type,
+      usedBy: Array.from(op.usedBy),
+      fields: Array.from(op.fields)
+    }))
+  }));
 }
 
 function generateSummary(

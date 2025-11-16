@@ -1,730 +1,518 @@
-/**
- * 🚀 Independent Conversation Runner
- * 
- * Este módulo permite que cada conversación avance a su propio ritmo,
- * sin esperar a que otras conversaciones terminen sus turnos.
- * 
- * VENTAJAS:
- * - UI más dinámica y realista
- * - No más tiempos de espera artificiales
- * - Mismo costo (misma cantidad de llamadas a API)
- * - Mejor experiencia de usuario
- */
-
+import { GoogleGenAI, Type } from "@google/genai";
 import type { AuditConfig, ExecutionStep } from '../types';
 import type { ConversationState, ProgressCallback } from './geminiService';
-import { generateUserMessageText, findUserMessageText, findAgentMessageText, getGlobalIntegrationManager } from './geminiService';
+import { 
+    generateUserMessageText, 
+    findAgentMessageText, 
+    findUserMessageText,
+    getGlobalIntegrationManager 
+} from './geminiService';
 import { getRealDatabaseAuditor } from './realDatabaseAuditor';
-import { extractBotPromises, verifyBotPromises } from './intelligentDatabaseVerifier';
-import { IntegrationManager, type ToolActionVerification } from './IntegrationManager';
-import { fetchWithTimeout, retryAsync, promiseWithTimeout, isRetryableError, delay } from './apiUtils';
-import { analyzeWebhookError, extractLastBotMessage, extractLastUserMessage } from './intelligentErrorAnalyzer';
+import { costTracker } from './costTracker';
 
 const MAX_CONVERSATION_TURNS = 12;
-const FETCH_TIMEOUT_MS = 5 * 60 * 1000; // 🔥 5 MINUTOS para cada request al webhook (workflows complejos pueden tardar)
-const MESSAGE_GENERATION_TIMEOUT_MS = 60000; // 🔥 1 MINUTO para generar mensajes con Gemini (más contexto = más tiempo)
+const WEBHOOK_TIMEOUT_MS = 60000; // 60 segundos por llamada al webhook (algunos agentes son lentos)
 
 /**
- * Ejecuta una conversación completa de manera independiente
+ * Ejecuta una conversación de manera independiente (para ejecución paralela)
+ * 
+ * @param conv - Estado de la conversación (testCase, history, etc.)
+ * @param index - Índice de la conversación (para logs)
+ * @param config - Configuración de la auditoría
+ * @param onProgress - Callback para actualizar la UI
+ * @param language - Idioma para generar mensajes
+ * @param abortSignal - Signal para cancelar la ejecución
  */
-export const runConversationIndependently = async (
+export async function runConversationIndependently(
     conv: ConversationState,
-    convIndex: number,
+    index: number,
     config: AuditConfig,
     onProgress: ProgressCallback,
     language: string,
-    abortSignal?: AbortSignal // 🔥 NUEVO: Para cancelar la conversación
-): Promise<void> => {
-    // 🛑 Verificar si ya fue cancelado antes de empezar
-    if (abortSignal?.aborted) {
-        console.log(`🛑 [${conv.testCase.title}] Conversación cancelada antes de iniciar`);
-        return;
-    }
-    console.log(`\n🎭 [${conv.testCase.title}] Iniciando conversación independiente (${convIndex + 1})...`);
+    abortSignal: AbortSignal
+): Promise<void> {
+    const conversationStartTime = Date.now();
     
-    // 📸 NUEVO: Tomar snapshot inicial ANTES del primer turno
-    if (config.realDatabaseConfig) {
-        const auditor = getRealDatabaseAuditor(conv.testCase.id);
-        if (auditor) {
-            try {
-                console.log(`   📸 [${conv.testCase.title}] Tomando snapshot INICIAL (antes del Turn 1)...`);
-                await auditor.takeSnapshot();
-                console.log(`   ✅ Snapshot inicial completado`);
-            } catch (error) {
-                console.error(`   ❌ Error en snapshot inicial:`, error);
-            }
-        }
-    }
+    console.log(`\n🎬 [${ conv.testCase.title}] ========== INICIANDO CONVERSACIÓN ==========`);
+    console.log(`   Conversación: ${index + 1}`);
+    console.log(`   Objetivo: ${conv.testCase.conversationGoal}`);
+    console.log(`   Persona: ${conv.testCase.persona}`);
+    console.log(`   Endpoint: ${config.endpointUrl}`);
+    console.log(`   BD habilitada: ${!!config.realDatabaseConfig}`);
+    console.log(`=========================================\n`);
     
-    for (let turnCount = 1; turnCount <= MAX_CONVERSATION_TURNS; turnCount++) {
-        // 🛑 Verificar cancelación antes de cada turno
-        if (abortSignal?.aborted) {
-            console.log(`🛑 [${conv.testCase.title}] Conversación cancelada en turno ${turnCount}`);
+    // Actualizar UI: conversación iniciada
+    onProgress({ 
+        message: `🎬 [${conv.testCase.title}] Conversación iniciada`,
+        testCaseId: conv.testCase.id
+    });
+    
+    // BUCLE DE TURNOS
+    for (let turnNumber = 1; turnNumber <= MAX_CONVERSATION_TURNS; turnNumber++) {
+        const turnStartTime = Date.now();
+        
+        // 🛑 Verificar si fue cancelado
+        if (abortSignal.aborted) {
+            console.log(`🛑 [${conv.testCase.title}] Cancelado en turno ${turnNumber}`);
+            onProgress({ 
+                message: `🛑 [${conv.testCase.title}] Cancelado por el usuario`,
+                testCaseId: conv.testCase.id
+            });
             conv.isComplete = true;
             conv.finalStatus = 'ERROR';
-            throw new Error('Auditoría cancelada por el usuario'); // 🔥 Lanzar error para salir inmediatamente
+            throw new Error('Conversación cancelada por el usuario');
         }
         
-        if (conv.isComplete) {
-            console.log(`[${conv.testCase.title}] ⏹️ Conversación ya completada, saltando turnos restantes`);
-            break;
-        }
-        
-        console.log(`\n[${conv.testCase.title}] 📍 Turno ${turnCount}/${MAX_CONVERSATION_TURNS}`);
+        console.log(`\n💬 [${conv.testCase.title}] ========== TURNO ${turnNumber}/${MAX_CONVERSATION_TURNS} ==========`);
         
         try {
-            // 1️⃣ Obtener contexto de BD y herramientas (si está disponible)
-            let dbContext: string | null = null;
-            let toolsContext: string | null = null;
+            // ========== 1. SNAPSHOT ANTES (si BD habilitada) ==========
+            let snapshotBefore;
+            const auditor = config.realDatabaseConfig ? getRealDatabaseAuditor(conv.testCase.id) : null;
             
-            if (config.realDatabaseConfig) {
-                const auditor = getRealDatabaseAuditor(conv.testCase.id);
-                if (auditor) {
-                    try {
-                        // Tomar snapshot antes de generar mensaje para tener contexto actualizado
-                        const currentSnapshot = await auditor.takeSnapshot();
-                        
-                        // 📊 Extraer información relevante de las tablas
-                        const contextLines: string[] = [];
-                        const summary = auditor.getSummary();
-                        
-                        for (const table of summary.tablesUsed) {
-                            const records = currentSnapshot.data[table] || [];
-                            if (records.length > 0) {
-                                // Buscar registro que corresponda a esta conversación
-                                const conversationRecord = records.find((r: any) => {
-                                    const sessionId = r.session_id || r.sessionId || r.session || r.id;
-                                    return sessionId && (
-                                        sessionId.includes(conv.testCase.id) ||
-                                        sessionId.includes(conv.testCase.initialPayload.telefonos) ||
-                                        sessionId.includes(conv.testCase.initialPayload.telefono) ||
-                                        sessionId.includes(conv.testCase.initialPayload.phone)
-                                    );
-                                });
-                                
-                                if (conversationRecord) {
-                                    contextLines.push(`Current Database State for "${table}":`);
-                                    
-                                    // Campos relevantes para el contexto
-                                    if (conversationRecord.is_blocked || conversationRecord.isBlocked) {
-                                        contextLines.push(`- You are BLOCKED until: ${conversationRecord.blocked_until || 'unknown'}`);
-                                        contextLines.push(`- Reason: ${conversationRecord.blocked_reason || 'Not specified'}`);
-                                    } else {
-                                        contextLines.push(`- You are NOT blocked (can continue conversation)`);
-                                    }
-                                    
-                                    if (conversationRecord.cost_usd || conversationRecord.price) {
-                                        contextLines.push(`- Current quoted price: $${conversationRecord.cost_usd || conversationRecord.price} USD`);
-                                    }
-                                    
-                                    if (conversationRecord.senia_confirmada || conversationRecord.depositConfirmed) {
-                                        contextLines.push(`- Deposit confirmed: ${conversationRecord.senia_confirmada || conversationRecord.depositConfirmed}`);
-                                    }
-                                    
-                                    if (conversationRecord.prioridad || conversationRecord.priority) {
-                                        contextLines.push(`- Priority level: ${conversationRecord.prioridad || conversationRecord.priority}`);
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if (contextLines.length > 0) {
-                            dbContext = contextLines.join('\n');
-                            console.log(`[${conv.testCase.title}] 📊 Contexto de BD disponible:\n${dbContext}`);
-                        }
-                        
-                        // 🔧 Detectar herramientas externas disponibles
-                        const toolsLines: string[] = [];
-                        const dependencies = auditor.dependencies;
-                        
-                        if (dependencies?.tools && dependencies.tools.length > 0) {
-                            toolsLines.push('External Tools Available:');
-                            for (const tool of dependencies.tools) {
-                                if (tool.toolType === 'email') {
-                                    toolsLines.push(`- Email system (${tool.specificType}) - can send proposals/quotes`);
-                                } else if (tool.toolType === 'calendar') {
-                                    toolsLines.push(`- Calendar (${tool.specificType}) - can schedule meetings/calls`);
-                                } else if (tool.toolType === 'crm') {
-                                    toolsLines.push(`- CRM system (${tool.specificType}) - can create leads/contacts`);
-                                } else if (tool.toolType === 'messaging') {
-                                    toolsLines.push(`- ${tool.specificType} messaging - can send notifications`);
-                                }
-                            }
-                        }
-                        
-                        if (dependencies?.subflows && dependencies.subflows.length > 0) {
-                            toolsLines.push('Available Automated Processes:');
-                            for (const subflow of dependencies.subflows) {
-                                toolsLines.push(`- ${subflow.workflowName || subflow.nodeName || 'Unnamed workflow'}`);
-                            }
-                        }
-                        
-                        if (toolsLines.length > 0) {
-                            toolsContext = toolsLines.join('\n');
-                            console.log(`[${conv.testCase.title}] 🔧 Herramientas disponibles:\n${toolsContext}`);
-                        }
-                    } catch (error) {
-                        console.warn(`[${conv.testCase.title}] ⚠️ No se pudo obtener contexto de BD:`, error);
-                    }
+            if (auditor) {
+                console.log(`   📸 Tomando snapshot ANTES del turno...`);
+                try {
+                    snapshotBefore = await auditor.takeSnapshot();
+                    console.log(`   ✅ Snapshot ANTES completado`);
+                } catch (snapshotError) {
+                    console.error(`   ⚠️ Error en snapshot ANTES:`, snapshotError);
+                    // Continuar sin snapshot (no es crítico)
                 }
             }
             
-            // 2️⃣ Generar mensaje del usuario con contexto completo (CON TIMEOUT)
-            onProgress({ message: `  [${conv.testCase.title}] ✍️ Turno ${turnCount}: Generando mensaje...` });
+            // ========== 2. EXTRAER CONTEXTO DE BD Y HERRAMIENTAS ==========
+            const databaseContext = auditor ? extractDatabaseContext(auditor) : null;
+            const toolsContext = extractToolsContext(config);
             
-            const messageText = await retryAsync(
-                () => promiseWithTimeout(
-                    generateUserMessageText(
-                        conv.testCase, 
-                        conv.history, 
-                        language, 
-                        dbContext,
-                        toolsContext
-                    ),
-                    MESSAGE_GENERATION_TIMEOUT_MS,
-                    `Timeout generando mensaje para ${conv.testCase.title}`
-                ),
-                {
-                    maxRetries: 3,
-                    retryDelay: 2000,
-                    shouldRetry: isRetryableError,
-                    signal: abortSignal, // 🔥 Respeta cancelación durante retries
-                    onRetry: (attempt, error) => {
-                        console.warn(`⚠️ [${conv.testCase.title}] Reintentando generación de mensaje (intento ${attempt}/3):`, error);
-                        onProgress({ message: `  [${conv.testCase.title}] ⚠️ Reintentando generación de mensaje (intento ${attempt}/3)` });
-                    }
-                }
-            );
-            
-            // 2️⃣ Preparar payload
-            const basePayload = { ...conv.testCase.initialPayload, conversationId: conv.testCase.id };
-            
-            // Detectar campo de mensaje
-            let messageField = null;
-            const commonFields = ['input', 'message', 'text', 'query', 'prompt', 'content', 'body', 'msg'];
-            for (const field of commonFields) {
-                const foundKey = Object.keys(basePayload).find(k => k.toLowerCase() === field || k.toLowerCase().includes(field));
-                if (foundKey && typeof basePayload[foundKey] === 'string') {
-                    messageField = foundKey;
-                    break;
-                }
-            }
-            
-            if (!messageField) {
-                const excludeFields = ['id', 'conversationid', 'sessionid', 'userid', 'timestamp', 'date'];
-                messageField = Object.keys(basePayload).find(k => {
-                    const lowerKey = k.toLowerCase();
-                    return typeof basePayload[k] === 'string' && 
-                           !excludeFields.some(exclude => lowerKey.includes(exclude));
-                });
-            }
-            
-            if (!messageField) {
-                messageField = 'input';
-            }
-            
-            const userInput = { 
-                ...basePayload,
-                [messageField]: messageText
-            };
-            
-            console.log(`[${conv.testCase.title}] 📤 Campo: "${messageField}", Mensaje: "${messageText}"`);
-            
-            // 3️⃣ Mostrar mensaje pendiente en UI
-            const pendingStep: ExecutionStep = {
-                nodeId: `Turn ${turnCount}`,
-                status: 'RUNNING',
-                input: userInput,
-                output: null,
-                log: 'Esperando respuesta...',
-                durationMs: 0,
-                timestamp: Date.now(),
-            };
-            
-            onProgress({ 
-                message: `  [${conv.testCase.title}] 📨 Enviando mensaje...`,
-                testCaseId: conv.testCase.id,
-                step: pendingStep
-            });
-            
-            // 🛑 Verificar cancelación antes de hacer el request
-            if (abortSignal?.aborted) {
-                console.log(`🛑 [${conv.testCase.title}] Cancelado antes de enviar request`);
-                throw new Error('Auditoría cancelada por el usuario');
-            }
-            
-            // 4️⃣ Snapshot BEFORE (si DB audit activa)
-            console.log(`\n🔍 [${conv.testCase.title}] ===== VERIFICANDO AUDITORÍA DE BD =====`);
-            console.log(`   config.realDatabaseConfig existe:`, !!config.realDatabaseConfig);
-            
-            if (config.realDatabaseConfig) {
-                console.log(`   ✅ Configuración de BD presente`);
-                console.log(`   - URL:`, config.realDatabaseConfig.url);
-                console.log(`   - Tablas:`, config.realDatabaseConfig.tables);
-                console.log(`   🔍 Buscando auditor para conversación: ${conv.testCase.id}`);
-                
-                const auditor = getRealDatabaseAuditor(conv.testCase.id);
-                console.log(`   Auditor encontrado:`, !!auditor);
-                
-                if (auditor) {
-                    console.log(`   ✅ AUDITOR ENCONTRADO - Tomando snapshot BEFORE...`);
-                    try {
-                        const snapshot = await auditor.takeSnapshot();
-                        console.log(`   ✅ Snapshot BEFORE completado`);
-                        console.log(`   📊 Registros en snapshot:`, Object.entries(snapshot.data).map(([table, rows]) => `${table}=${rows.length}`).join(', '));
-                    } catch (error) {
-                        console.error(`   ❌ ERROR tomando snapshot BEFORE:`, error);
-                        console.error(`   Stack trace:`, error instanceof Error ? error.stack : 'No stack');
-                        onProgress({ message: `    [${conv.testCase.title}] ❌ Error en snapshot BD: ${error}` });
-                    }
-                } else {
-                    console.error(`   ❌ AUDITOR NO ENCONTRADO para conversación: ${conv.testCase.id}`);
-                    console.error(`   🚨 ESTO ES UN PROBLEMA - El auditor debería existir`);
-                    onProgress({ message: `    [${conv.testCase.title}] ⚠️ Auditor de BD no encontrado` });
-                }
-            } else {
-                console.log(`   ℹ️ No hay configuración de BD - skipping auditoría`);
-            }
-            console.log(`========================================\n`);
-            
-            // 5️⃣ Enviar request al webhook (CON TIMEOUT Y RETRY)
-            const turnStartTime = Date.now();
-            console.log(`🌐 [${conv.testCase.title}] POST ${config.endpointUrl}`);
-            
-            const response = await retryAsync(
-                () => fetchWithTimeout(
-                    config.endpointUrl!,
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(userInput),
-                        signal: abortSignal
-                    },
-                    FETCH_TIMEOUT_MS
-                ),
-                {
-                    maxRetries: 2, // Solo 2 reintentos para no bloquear mucho
-                    retryDelay: 3000,
-                    signal: abortSignal, // 🔥 Respeta cancelación durante retries
-                    shouldRetry: (error) => {
-                        // No reintentar si es cancelación manual
-                        if (error instanceof Error && error.name === 'AbortError') {
-                            return false;
-                        }
-                        return isRetryableError(error);
-                    },
-                    onRetry: (attempt, error) => {
-                        console.warn(`⚠️ [${conv.testCase.title}] Reintentando llamada al webhook (intento ${attempt}/2):`, error);
-                        onProgress({ message: `  [${conv.testCase.title}] ⚠️ Reintentando llamada (intento ${attempt}/2)` });
-                    }
-                }
-            );
-            
-            const durationMs = Date.now() - turnStartTime;
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const responseText = await response.text();
-            let responseData;
-            
-            // 6️⃣ Analizar respuesta
-            if (!responseText || responseText.trim() === '') {
-                // Respuesta vacía - analizar si es bloqueo
-                console.warn(`⚠️ [${conv.testCase.title}] Respuesta vacía`);
-                
-                const userId = (conv.testCase.initialPayload as any).telefono || 
-                              (conv.testCase.initialPayload as any).phone || 
-                              conv.testCase.id;
-                
-                const errorAnalysis = await analyzeWebhookError({
-                    webhookResponse: null,
-                    webhookError: 'Respuesta vacía',
-                    conversationHistory: conv.history,
-                    lastBotMessage: extractLastBotMessage(conv.history),
-                    lastUserMessage: extractLastUserMessage(conv.history),
-                    conversationId: conv.testCase.id,
-                    userId
-                });
-                
-                if (!errorAnalysis.isRealError) {
-                    // Bloqueo intencional
-                    onProgress({ message: `  [${conv.testCase.title}] 🚫 ${errorAnalysis.reason}` });
-                    
-                    const step: ExecutionStep = {
-                        nodeId: `Turn ${turnCount}`,
-                        status: 'SUCCESS',
-                        input: userInput,
-                        output: { 
-                            intentional_end: true,
-                            reason: errorAnalysis.reason,
-                            evidence: errorAnalysis.evidence
-                        },
-                        log: `${errorAnalysis.actualStatus}: ${errorAnalysis.reason}`,
-                        durationMs,
-                        timestamp: Date.now(),
-                    };
-                    
-                    conv.history.push(step);
-                    conv.isComplete = true;
-                    conv.finalStatus = 'SUCCESS';
-                    
-                    onProgress({ 
-                        message: `  [${conv.testCase.title}] 🏁 Finalizada`,
-                        testCaseId: conv.testCase.id,
-                        step
-                    });
-                    
-                    break;
-                }
-                
-                throw new Error('Webhook devolvió respuesta vacía');
-            }
+            // ========== 3. GENERAR MENSAJE DEL USUARIO ==========
+            console.log(`   🧠 Generando mensaje del usuario...`);
+            let userMessage: string;
             
             try {
-                responseData = JSON.parse(responseText);
-            } catch (parseError) {
-                throw new Error(`JSON inválido: ${parseError instanceof Error ? parseError.message : 'Unknown'}`);
+                userMessage = await generateUserMessageText(
+                    conv.testCase,
+                    conv.history,
+                    language,
+                    databaseContext,
+                    toolsContext
+                );
+                console.log(`   ✅ Mensaje generado: "${userMessage}"`);
+            } catch (genError) {
+                console.error(`   ❌ Error generando mensaje:`, genError);
+                throw new Error(`Error generando mensaje: ${genError instanceof Error ? genError.message : String(genError)}`);
             }
             
-            // 7️⃣ Detectar bloqueo explícito ({ blocked: true })
-            if (responseData && responseData.blocked === true) {
-                console.log(`🚫 [${conv.testCase.title}] Bloqueo explícito`);
-                onProgress({ message: `  [${conv.testCase.title}] 🚫 Usuario bloqueado` });
+            // ========== 4. PREPARAR PAYLOAD PARA EL WEBHOOK ==========
+            // 🔥 CRÍTICO: NO hacer spread del initialPayload completo porque incluye el body original
+            // Solo copiar los campos de identificación (session_id, from, pushName) y usar el NUEVO mensaje
+            const webhookPayload: Record<string, any> = {
+                // Campos de identificación (sin el body original)
+                session_id: conv.testCase.initialPayload.session_id || conv.testCase.initialPayload.sessionId || conv.testCase.id,
+                from: conv.testCase.initialPayload.from || conv.testCase.initialPayload.session_id || conv.testCase.id,
+                pushName: conv.testCase.initialPayload.pushName || conv.testCase.initialPayload.nombre || conv.testCase.initialPayload.name || 'Test User',
                 
-                const step: ExecutionStep = {
-                    nodeId: `Turn ${turnCount}`,
-                    status: 'SUCCESS',
-                    input: userInput,
-                    output: {
-                        ...responseData,
-                        intentional_block: true
+                // MENSAJE NUEVO (usar 'body' porque es lo que espera el webhook de WhatsApp/BuilderBot)
+                body: userMessage,
+                
+                // Campos adicionales útiles
+                conversationId: conv.testCase.id,
+                turnNumber: turnNumber
+            };
+            
+            console.log(`   🌐 Enviando al webhook: ${config.endpointUrl}`);
+            console.log(`   📦 Payload:`, JSON.stringify(webhookPayload, null, 2).substring(0, 300));
+            
+            // Actualizar UI: enviando mensaje
+            onProgress({
+                message: `💬 [${conv.testCase.title}] Turno ${turnNumber}: Enviando mensaje...`,
+                testCaseId: conv.testCase.id,
+                step: {
+                    nodeId: `Turn ${turnNumber}`,
+                    status: 'RUNNING',
+                    input: { message: userMessage },
+                    output: null,
+                    log: 'Enviando mensaje al webhook...',
+                    durationMs: 0,
+                    timestamp: Date.now()
+                }
+            });
+            
+            // ========== 5. VERIFICAR BLOQUEO ANTES DE ENVIAR ==========
+            // 🔥 NUEVO: Verificar si el usuario está bloqueado en BD ANTES del timeout
+            const dbAuditor = getRealDatabaseAuditor(conv.testCase.id);
+            if (dbAuditor && turnNumber > 1) { // Solo después del primer turno
+                try {
+                    const userId = webhookPayload.session_id || webhookPayload.from || conv.testCase.id;
+                    const isNotBlocked = await dbAuditor.verifyNotBlocked(userId, `Before Turn ${turnNumber}`);
+                    
+                    if (!isNotBlocked) {
+                        console.log(`   🚫 Usuario bloqueado en BD - Finalizando conversación`);
+                        onProgress({
+                            message: `🚫 [${conv.testCase.title}] Usuario bloqueado en base de datos`,
+                            testCaseId: conv.testCase.id,
+                            step: {
+                                nodeId: `Turn ${turnNumber}`,
+                                status: 'SUCCESS',
+                                input: { message: userMessage },
+                                output: { blocked: true, reason: 'Usuario bloqueado en BD' },
+                                log: 'Usuario bloqueado - Conversación finalizada correctamente',
+                                durationMs: 0,
+                                timestamp: Date.now()
+                            }
+                        });
+                        break; // Finalizar conversación
+                    }
+                } catch (blockCheckError) {
+                    console.warn(`   ⚠️ No se pudo verificar bloqueo:`, blockCheckError);
+                    // Continuar de todos modos
+                }
+            }
+            
+            // ========== 6. ENVIAR AL WEBHOOK CON TIMEOUT ==========
+            let agentResponse: any;
+            let webhookError = false;
+            
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+                
+                // Combinar el signal de timeout con el signal de cancelación del usuario
+                const combinedSignal = abortSignal.aborted ? abortSignal : controller.signal;
+                
+                const webhookResponse = await fetch(config.endpointUrl!, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Audit-Mode': 'true', // 🔥 CRÍTICO: El bot NO debe escribir en BD
+                        'X-Audit-Session': conv.testCase.id, // Para tracking de auditorías
                     },
-                    log: `USER_BLOCKED: ${responseData.reason || responseData.message || 'Usuario bloqueado'}`,
-                    durationMs,
-                    timestamp: Date.now(),
-                };
-                
-                conv.history.push(step);
-                conv.isComplete = true;
-                conv.finalStatus = 'SUCCESS';
-                
-                onProgress({ 
-                    message: `  [${conv.testCase.title}] 🏁 Bloqueado`,
-                    testCaseId: conv.testCase.id,
-                    step
+                    body: JSON.stringify(webhookPayload),
+                    signal: combinedSignal
                 });
                 
+                clearTimeout(timeoutId);
+                
+                if (!webhookResponse.ok) {
+                    throw new Error(`Webhook respondió con status ${webhookResponse.status}: ${webhookResponse.statusText}`);
+                }
+                
+                agentResponse = await webhookResponse.json();
+                console.log(`   ✅ Respuesta del webhook recibida`);
+                console.log(`   🤖 Agente: "${findAgentMessageText(agentResponse)}"`);
+                
+            } catch (webhookErr: any) {
+                webhookError = true;
+                
+                if (webhookErr.name === 'AbortError') {
+                    if (abortSignal.aborted) {
+                        console.log(`   🛑 Webhook cancelado por el usuario`);
+                        throw new Error('Conversación cancelada por el usuario');
+                    } else {
+                        console.error(`   ⏱️ TIMEOUT: Webhook no respondió en ${WEBHOOK_TIMEOUT_MS}ms`);
+                        agentResponse = { 
+                            error: 'Webhook timeout',
+                            message: 'El agente no respondió a tiempo'
+                        };
+                    }
+                } else {
+                    console.error(`   ❌ Error llamando al webhook:`, webhookErr);
+                    agentResponse = { 
+                        error: webhookErr.message || 'Unknown error',
+                        message: 'Error conectando con el agente'
+                    };
+                }
+            }
+            
+            const turnDuration = Date.now() - turnStartTime;
+            
+            // ========== 6. SNAPSHOT DESPUÉS (si BD habilitada) ==========
+            let snapshotAfter;
+            let dbChangesThisTurn: any[] = [];
+            
+            if (auditor && !webhookError) {
+                console.log(`   📸 Tomando snapshot DESPUÉS del turno...`);
+                try {
+                    snapshotAfter = await auditor.takeSnapshot();
+                    console.log(`   ✅ Snapshot DESPUÉS completado`);
+                    
+                    // ========== 7. COMPARAR SNAPSHOTS ==========
+                    if (snapshotBefore && snapshotAfter) {
+                        console.log(`   🔍 Comparando snapshots...`);
+                        const changesBefore = auditor.changes.length;
+                        auditor.compareSnapshots(snapshotBefore, snapshotAfter);
+                        const changesAfter = auditor.changes.length;
+                        
+                        dbChangesThisTurn = auditor.changes.slice(changesBefore);
+                        
+                        if (dbChangesThisTurn.length > 0) {
+                            console.log(`   📊 Cambios detectados en BD: ${dbChangesThisTurn.length}`);
+                            dbChangesThisTurn.forEach((change, idx) => {
+                                console.log(`      ${idx + 1}. ${change.type} en tabla "${change.table}"`);
+                            });
+                        } else {
+                            console.log(`   ℹ️ No se detectaron cambios en BD`);
+                        }
+                    }
+                } catch (snapshotError) {
+                    console.error(`   ⚠️ Error en snapshot DESPUÉS:`, snapshotError);
+                }
+            }
+            
+            // ========== 8. VERIFICAR HERRAMIENTAS EXTERNAS (Gmail, Calendar, etc.) ==========
+            if (!webhookError) {
+                const integrationManager = getGlobalIntegrationManager();
+                if (integrationManager) {
+                    console.log(`   🔧 Verificando herramientas externas...`);
+                    try {
+                        const agentMessageText = findAgentMessageText(agentResponse);
+                        const verifications = await integrationManager.verifyAllActions(
+                            agentMessageText,
+                            turnNumber
+                        );
+                        
+                        if (verifications.length > 0) {
+                            console.log(`   ✅ Verificación de herramientas completada: ${verifications.length} acción(es)`);
+                            verifications.forEach(v => {
+                                const icon = v.verified ? '✅' : '❌';
+                                console.log(`      ${icon} ${v.claim.type}: ${v.message}`);
+                            });
+                            
+                            // Guardar verifications en el estado de la conversación
+                            if (!conv.toolVerifications) {
+                                conv.toolVerifications = [];
+                            }
+                            conv.toolVerifications.push(...verifications);
+                        } else {
+                            console.log(`   ℹ️ No se detectaron acciones de herramientas en este turno`);
+                        }
+                    } catch (toolError) {
+                        console.error(`   ⚠️ Error verificando herramientas:`, toolError);
+                        // No es crítico, continuar
+                    }
+                }
+            }
+            
+            // ========== 9. GUARDAR EN HISTORY ==========
+            const executionStep: ExecutionStep = {
+                nodeId: `Turn ${turnNumber}`,
+                status: webhookError ? 'ERROR' : 'SUCCESS',
+                input: { message: userMessage, ...webhookPayload },
+                output: agentResponse,
+                log: webhookError 
+                    ? `Error: ${agentResponse.error || 'Unknown error'}`
+                    : `Turno ${turnNumber} completado exitosamente`,
+                durationMs: turnDuration,
+                timestamp: Date.now()
+            };
+            
+            conv.history.push(executionStep);
+            
+            // ========== 10. ACTUALIZAR UI CON RESULTADO DEL TURNO ==========
+            onProgress({
+                message: `${webhookError ? '❌' : '✅'} [${conv.testCase.title}] Turno ${turnNumber}/${MAX_CONVERSATION_TURNS} ${webhookError ? 'con error' : 'completado'}`,
+                testCaseId: conv.testCase.id,
+                step: executionStep
+            });
+            
+            console.log(`   ⏱️ Turno completado en ${turnDuration}ms`);
+            console.log(`=========================================\n`);
+            
+            // ========== 11. VERIFICAR SI DEBE TERMINAR ==========
+            
+            // Si hubo error en el webhook, terminar la conversación
+            if (webhookError) {
+                console.log(`   🛑 Terminando conversación por error en webhook`);
                 break;
             }
             
-            // 🔥 NUEVO: Capturar IDs reales de la respuesta del webhook
-            if (config.realDatabaseConfig && responseData) {
-                const auditor = getRealDatabaseAuditor(conv.testCase.id);
-                if (auditor) {
-                    console.log(`\n🔍 [${conv.testCase.title}] Extrayendo IDs reales de respuesta del webhook...`);
-                    
-                    // Buscar campos comunes de identificadores en la respuesta
-                    const realIds: string[] = [];
-                    const fieldNames = [
-                        'sessionId', 'session_id', 'session',
-                        'conversationId', 'conversation_id', 'conversation',
-                        'chatId', 'chat_id', 'chat',
-                        'userId', 'user_id', 'user',
-                        'telefono', 'phone', 'telephone', 'tel'
-                    ];
-                    
-                    function extractFromObject(obj: any) {
-                        if (!obj || typeof obj !== 'object') return;
-                        
-                        for (const [key, value] of Object.entries(obj)) {
-                            if (fieldNames.some(f => key.toLowerCase() === f.toLowerCase())) {
-                                const strValue = String(value);
-                                if (strValue && strValue.length >= 8 && !/^TC[-_]/i.test(strValue)) {
-                                    realIds.push(strValue);
-                                    console.log(`      📌 ID real: ${key}="${strValue}"`);
-                                }
-                            }
-                            
-                            if (typeof value === 'object' && value !== null) {
-                                extractFromObject(value);
-                            }
-                        }
-                    }
-                    
-                    extractFromObject(responseData);
-                    
-                    if (realIds.length > 0) {
-                        console.log(`   ✅ Total IDs reales encontrados: ${realIds.length}`);
-                        auditor.updateSearchIdentifiers(realIds);
-                    } else {
-                        console.log(`   ℹ️ No se encontraron IDs adicionales en la respuesta`);
-                    }
-                }
-            }
-            
-            // 8️⃣ Snapshot AFTER y comparar
-            console.log(`\n🔍 [${conv.testCase.title}] ===== SNAPSHOT AFTER =====`);
-            if (config.realDatabaseConfig) {
-                const auditor = getRealDatabaseAuditor(conv.testCase.id);
-                console.log(`   Auditor encontrado:`, !!auditor);
+            // Verificar si el objetivo fue logrado
+            if (turnNumber >= 3) { // Mínimo 3 turnos antes de verificar
+                console.log(`   🎯 Verificando si el objetivo fue logrado...`);
+                const goalAchieved = await shouldEndConversation(
+                    conv.testCase, 
+                    conv.history, 
+                    language
+                );
                 
-                if (auditor) {
-                    console.log(`   📊 Estado del auditor:`);
-                    console.log(`      - Snapshots previos: ${auditor.snapshots.size}`);
-                    console.log(`      - Cambios acumulados: ${auditor.changes.length}`);
-                    
-                    try {
-                        // ⏱️ DELAY: Esperar a que el webhook del usuario guarde en BD
-                        // Muchos webhooks guardan de forma asíncrona, necesitamos esperar
-                        onProgress({ message: `    [${conv.testCase.title}] ⏱️ Esperando actualización de BD...` });
-                        await delay(3000, abortSignal); // 3 segundos - respeta cancelación
-                        
-                        const changesBefore = auditor.changes.length;
-                        console.log(`   📸 Tomando snapshot AFTER...`);
-                        const afterSnap = await auditor.takeSnapshot();
-                        console.log(`   ✅ Snapshot AFTER completado`);
-                        console.log(`   📊 Total snapshots ahora: ${auditor.snapshots.size}`);
-                        
-                        if (auditor.snapshots.size >= 2) {
-                            console.log(`   🔄 Comparando snapshots (tenemos ${auditor.snapshots.size})...`);
-                            const timestamps = Array.from(auditor.snapshots.keys()).sort((a, b) => b - a);
-                            const afterSnapshot = auditor.snapshots.get(timestamps[0])!;
-                            const beforeSnapshot = auditor.snapshots.get(timestamps[1])!;
-                            
-                            // Log detallado de snapshots para diagnóstico
-                            console.log(`\n   📊 Comparación detallada:`);
-                            const summary = auditor.getSummary();
-                            for (const table of summary.tablesUsed) {
-                                const beforeCount = beforeSnapshot.data[table]?.length || 0;
-                                const afterCount = afterSnapshot.data[table]?.length || 0;
-                                const diff = afterCount - beforeCount;
-                                console.log(`      ${table}: BEFORE=${beforeCount}, AFTER=${afterCount}, DIFF=${diff > 0 ? '+' : ''}${diff}`);
-                                if (afterCount > beforeCount) {
-                                    onProgress({ message: `    [${conv.testCase.title}] 🗄️ Tabla "${table}": +${afterCount - beforeCount} registros nuevos` });
-                                }
-                            }
-                            
-                            console.log(`   🔍 Ejecutando compareSnapshots()...`);
-                            auditor.compareSnapshots(beforeSnapshot, afterSnapshot);
-                            console.log(`   ✅ Comparación completada`);
-                            
-                            const newChanges = auditor.changes.length - changesBefore;
-                            console.log(`   📝 Nuevos cambios detectados: ${newChanges}`);
-                            
-                            // 🔧 NUEVO: Verificar herramientas (emails, etc.) después de comparar BD
-                            const latestChanges = auditor.changes.slice(-newChanges);
-                            const botResponseText = typeof responseData === 'string' 
-                                ? responseData 
-                                : JSON.stringify(responseData);
-                            
-                            await auditor.verifyToolsForTurn(
-                                turnCount,
-                                botResponseText,
-                                latestChanges,
-                                responseData
-                            );
-                            
-                            if (newChanges > 0) {
-                                const latestChanges = auditor.changes.slice(-newChanges);
-                                latestChanges.forEach(change => {
-                                    const emoji = change.type === 'INSERT' ? '➕' : change.type === 'UPDATE' ? '🔄' : '➖';
-                                    const details = change.type === 'INSERT' 
-                                        ? ` (nuevo registro)`
-                                        : change.type === 'UPDATE'
-                                        ? ` (campos: ${change.record.changedFields?.join(', ')})`
-                                        : ` (eliminado)`;
-                                    onProgress({ message: `    [${conv.testCase.title}] ${emoji} BD: ${change.type} en "${change.table}"${details}` });
-                                });
-                            } else {
-                                // Si no se detectaron cambios pero hay diferencia en conteos, avisar
-                                const totalBefore = Object.values(beforeSnapshot.data).reduce((sum, rows) => sum + rows.length, 0);
-                                const totalAfter = Object.values(afterSnapshot.data).reduce((sum, rows) => sum + rows.length, 0);
-                                console.log(`   📊 Total registros: BEFORE=${totalBefore}, AFTER=${totalAfter}`);
-                                if (totalAfter > totalBefore) {
-                                    onProgress({ message: `    [${conv.testCase.title}] ℹ️ BD: +${totalAfter - totalBefore} registros totales (sin cambios rastreables)` });
-                                } else if (totalBefore === 0 && totalAfter === 0) {
-                                    console.warn(`   🚨 PROBLEMA: Ambos snapshots tienen 0 registros - RLS o tablas vacías`);
-                                    onProgress({ message: `    [${conv.testCase.title}] ⚠️ BD: 0 registros detectados (verifica RLS)` });
-                                }
-                            }
-                        } else {
-                            console.warn(`   ⚠️ No hay suficientes snapshots para comparar (solo ${auditor.snapshots.size})`);
-                        }
-                    } catch (error) {
-                        console.error(`   ❌ ERROR en snapshot AFTER:`, error);
-                        console.error(`   Stack:`, error instanceof Error ? error.stack : 'No stack');
-                        onProgress({ message: `    [${conv.testCase.title}] ❌ Error en snapshot AFTER: ${error}` });
-                    }
+                if (goalAchieved) {
+                    console.log(`   ✅ ¡Objetivo logrado! Terminando conversación.`);
+                    onProgress({
+                        message: `🎯 [${conv.testCase.title}] Objetivo logrado en ${turnNumber} turnos`,
+                        testCaseId: conv.testCase.id
+                    });
+                    break;
                 } else {
-                    console.error(`   ❌ AUDITOR NO ENCONTRADO en AFTER`);
-                }
-            }
-            console.log(`========================================\n`);
-            
-            // 9️⃣ Éxito - guardar step
-            const step: ExecutionStep = {
-                nodeId: `Turn ${turnCount}`,
-                status: 'SUCCESS',
-                input: userInput,
-                output: responseData,
-                log: `Success on Round ${turnCount}.`,
-                durationMs,
-                timestamp: Date.now(),
-            };
-            
-            conv.history.push(step);
-            
-            onProgress({ 
-                message: `  [${conv.testCase.title}] ✅ Turno ${turnCount} completo (${durationMs}ms)`,
-                testCaseId: conv.testCase.id,
-                step
-            });
-            
-            // 🔟 Verificación inteligente de promesas (CON TIMEOUT)
-            if (config.realDatabaseConfig) {
-                try {
-                    const userMsg = findUserMessageText(step.input);
-                    const botResponse = findAgentMessageText(step.output);
-                    const conversationContext = conv.history.slice(0, -1).map(h => 
-                        `Usuario: ${findUserMessageText(h.input)}\nBot: ${findAgentMessageText(h.output)}`
-                    ).join('\n\n');
-                    
-                    // 🚀 Timeout de 45 segundos para extractBotPromises (puede ser lento con Gemini)
-                    const promises = await promiseWithTimeout(
-                        extractBotPromises(botResponse, userMsg, conversationContext, language),
-                        45000,
-                        `Timeout extrayendo promesas del bot para ${conv.testCase.title}`
-                    );
-                    
-                    if (promises.length > 0) {
-                        const userId = (conv.testCase.initialPayload as any).telefono || 
-                                      (conv.testCase.initialPayload as any).phone || 
-                                      conv.testCase.id;
-                        
-                        // 🚀 Timeout de 30 segundos para verifyBotPromises
-                        const newDiscrepancies = await promiseWithTimeout(
-                            verifyBotPromises(conv.testCase.id, promises, userId),
-                            30000,
-                            `Timeout verificando promesas para ${conv.testCase.title}`
-                        );
-                        
-                        if (newDiscrepancies.length > 0) {
-                            onProgress({ message: `    [${conv.testCase.title}] ⚠️ ${newDiscrepancies.length} discrepancia(s) en BD` });
-                        }
-                    }
-                } catch (error) {
-                    const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
-                    console.error(`[Verifier] Error:`, errorMsg);
-                    onProgress({ message: `    [${conv.testCase.title}] ⚠️ Error en verificación: ${errorMsg}` });
+                    console.log(`   ↻ Objetivo no logrado aún, continuando...`);
                 }
             }
             
-            // 🔗 NUEVO: Verificación de herramientas externas (Email, Calendar, etc.) CON TIMEOUT
-            const integrationManager = getGlobalIntegrationManager();
-            if (integrationManager && integrationManager.hasToolsConfigured()) {
-                try {
-                    const botResponse = findAgentMessageText(step.output);
-                    
-                    onProgress({ message: `    [${conv.testCase.title}] 🔍 Verificando herramientas...` });
-                    
-                    // 🚀 Timeout de 30 segundos para verificación de herramientas (Gmail API normalmente responde en 5-10s)
-                    const toolVerifications = await promiseWithTimeout(
-                        integrationManager.verifyAllActions(botResponse, turnCount),
-                        30000, // 🔥 30s = suficiente para Gmail API (usualmente 5-10s)
-                        `Timeout verificando herramientas para ${conv.testCase.title}`
-                    );
-                    
-                    // Guardar verificaciones en el estado de la conversación
-                    if (!conv.toolVerifications) {
-                        conv.toolVerifications = [];
-                    }
-                    conv.toolVerifications.push(...toolVerifications);
-                    
-                    // Log resultados de verificación
-                    if (toolVerifications.length > 0) {
-                        const verifiedCount = toolVerifications.filter(v => v.verified).length;
-                        const failedCount = toolVerifications.filter(v => !v.verified).length;
-                        
-                        if (failedCount > 0) {
-                            onProgress({ message: `    [${conv.testCase.title}] ❌ ${failedCount} herramienta(s) fallaron verificación` });
-                        } else {
-                            onProgress({ message: `    [${conv.testCase.title}] ✅ ${verifiedCount} herramienta(s) verificadas` });
-                        }
-                        
-                        // Log detallado por cada verificación
-                        toolVerifications.forEach(v => {
-                            const icon = v.verified ? '✅' : '❌';
-                            onProgress({ message: `      ${icon} ${v.claim.type}: ${v.message}` });
-                        });
-                    }
-                } catch (error) {
-                    const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
-                    console.error(`[IntegrationManager] Error verificando herramientas:`, errorMsg);
-                    
-                    // No fallar la auditoría por timeout de verificación - solo advertir
-                    if (errorMsg.includes('Timeout')) {
-                        onProgress({ message: `    [${conv.testCase.title}] ⚠️ Timeout verificando herramientas (APIs lentas). Continuando...` });
-                    } else {
-                        onProgress({ message: `    [${conv.testCase.title}] ⚠️ Error verificando herramientas: ${errorMsg}` });
-                    }
-                }
+        } catch (turnError: any) {
+            console.error(`   ❌ Error en turno ${turnNumber}:`, turnError);
+            
+            // Si es cancelación, propagar
+            if (turnError.message?.includes('cancelada por el usuario') || turnError.name === 'AbortError') {
+                throw turnError;
             }
             
-        } catch (error) {
-            // 🛑 Verificar si es cancelación (AbortError)
-            if (error instanceof Error && error.name === 'AbortError') {
-                console.log(`🛑 [${conv.testCase.title}] Conversación cancelada por el usuario`);
-                conv.isComplete = true;
-                conv.finalStatus = 'ERROR';
-                onProgress({ message: `  [${conv.testCase.title}] 🛑 Cancelado por usuario` });
-                break; // Salir limpiamente
-            }
-            
-            // ❌ Error real
-            const durationMs = Date.now() - Date.now(); // Aproximado
-            const logMessage = error instanceof Error ? error.message : "Error desconocido";
-            
-            console.error(`\n❌ [${conv.testCase.title}] ERROR:`, logMessage);
-            onProgress({ message: `  [${conv.testCase.title}] ❌ Error: ${logMessage}` });
-            
-            const step: ExecutionStep = {
-                nodeId: `Turn ${turnCount}`,
+            // Para otros errores, registrar y terminar conversación
+            conv.history.push({
+                nodeId: `Turn ${turnNumber}`,
                 status: 'ERROR',
-                input: conv.history.length > 0 ? conv.history[conv.history.length - 1].input : {},
-                output: null,
-                log: logMessage,
-                durationMs,
-                timestamp: Date.now(),
-            };
-            
-            conv.history.push(step);
-            conv.isComplete = true;
-            conv.finalStatus = 'ERROR';
-            
-            onProgress({ 
-                message: `  [${conv.testCase.title}] ⛔ Conversación terminada por error`,
-                testCaseId: conv.testCase.id,
-                step
+                input: { error: 'Turn failed to complete' },
+                output: { error: turnError.message || 'Unknown error' },
+                log: `Error en turno ${turnNumber}: ${turnError.message || String(turnError)}`,
+                durationMs: Date.now() - turnStartTime,
+                timestamp: Date.now()
             });
             
+            onProgress({
+                message: `❌ [${conv.testCase.title}] Error en turno ${turnNumber}: ${turnError.message}`,
+                testCaseId: conv.testCase.id,
+                step: conv.history[conv.history.length - 1]
+            });
+            
+            // Terminar conversación después de un error
             break;
         }
     }
     
-    // Marcar como completada si llegó a todos los turnos
-    if (!conv.isComplete && conv.history.length >= MAX_CONVERSATION_TURNS) {
-        conv.isComplete = true;
+    // ========== MARCAR CONVERSACIÓN COMO COMPLETA ==========
+    conv.isComplete = true;
+    
+    if (conv.finalStatus === 'PENDING') {
         conv.finalStatus = 'SUCCESS';
-        onProgress({ message: `  [${conv.testCase.title}] 🎯 Completó ${MAX_CONVERSATION_TURNS} turnos` });
     }
     
-    // ⏱️ Marcar tiempo de finalización
-    if (conv.isComplete && !conv.endTime) {
-        conv.endTime = Date.now();
-        const durationSeconds = conv.startTime ? (conv.endTime - conv.startTime) / 1000 : 0;
-        console.log(`\n✅ [${conv.testCase.title}] Conversación finalizada. Duración: ${durationSeconds.toFixed(1)}s | Total turnos: ${conv.history.length}`);
-    }
-};
+    conv.endTime = Date.now();
+    const totalDuration = conv.endTime - conversationStartTime;
+    
+    console.log(`\n✅ [${conv.testCase.title}] ========== CONVERSACIÓN FINALIZADA ==========`);
+    console.log(`   Total turnos: ${conv.history.length}`);
+    console.log(`   Status final: ${conv.finalStatus}`);
+    console.log(`   Duración total: ${(totalDuration / 1000).toFixed(1)}s`);
+    console.log(`=========================================\n`);
+    
+    onProgress({
+        message: `✅ [${conv.testCase.title}] Conversación finalizada (${conv.history.length} turnos, ${(totalDuration / 1000).toFixed(1)}s)`,
+        testCaseId: conv.testCase.id
+    });
+}
 
+/**
+ * Determina si la conversación debe terminar (objetivo logrado)
+ * Usa IA para analizar el historial y determinar si el goal fue alcanzado
+ */
+async function shouldEndConversation(
+    testCase: any,
+    conversationHistory: ExecutionStep[],
+    language: string
+): Promise<boolean> {
+    if (conversationHistory.length === 0) return false;
+    
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const historyString = conversationHistory.map(turn =>
+        `User: ${findUserMessageText(turn.input)}\nAgent: ${findAgentMessageText(turn.output)}`
+    ).join('\n\n');
+    
+    const prompt = `
+    You are a QA Analyst judging a conversation.
+    The user's goal was: "${testCase.conversationGoal}"
+    
+    Here is the conversation history:
+    ${historyString}
+    
+    Has the user's goal been fully and satisfactorily achieved?
+    Answer with a single boolean value in a JSON object. For example: {"goalAchieved": true}
+    
+    Be strict: the goal must be COMPLETED, not just in progress.
+    `;
+    
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        goalAchieved: { type: Type.BOOLEAN },
+                    },
+                    required: ['goalAchieved'],
+                }
+            }
+        });
+        
+        // 💰 Track usage
+        if (response.usageMetadata) {
+            costTracker.recordUsage({
+                promptTokens: response.usageMetadata.promptTokenCount || 0,
+                responseTokens: response.usageMetadata.candidatesTokenCount || 0,
+                totalTokens: response.usageMetadata.totalTokenCount || 0,
+                model: 'gemini-2.5-flash',
+                operation: 'check_goal_achieved',
+                conversationId: testCase.id
+            });
+        }
+        
+        const result = JSON.parse(response.text);
+        return result.goalAchieved === true;
+    } catch (e) {
+        console.error(`   ⚠️ Error verificando objetivo:`, e);
+        return false; // Si falla, asumir que no se logró
+    }
+}
+
+/**
+ * Extrae contexto relevante de los cambios en la base de datos
+ * Para informar al usuario simulado de lo que pasó en BD
+ */
+function extractDatabaseContext(auditor: any): string | null {
+    if (!auditor) return null;
+    
+    const changes = auditor.changes || [];
+    if (changes.length === 0) return null;
+    
+    // Resumir los últimos cambios
+    const recentChanges = changes.slice(-5); // Últimos 5 cambios
+    
+    const summaries = recentChanges.map((change: any) => {
+        const { type, table, record } = change;
+        
+        switch (type) {
+            case 'INSERT':
+                return `Se creó un registro en ${table}`;
+            case 'UPDATE':
+                return `Se actualizó un registro en ${table}`;
+            case 'DELETE':
+                return `Se eliminó un registro de ${table}`;
+            default:
+                return `Cambio en ${table}`;
+        }
+    });
+    
+    return `FYI: ${summaries.join('. ')}.`;
+}
+
+/**
+ * Extrae contexto sobre herramientas externas disponibles
+ * Para que el usuario sepa qué puede pedir (emails, citas, etc.)
+ */
+function extractToolsContext(config: AuditConfig): string | null {
+    if (!config.integrationConfig?.enabledIntegrations) return null;
+    
+    const tools: string[] = [];
+    
+    if (config.integrationConfig.enabledIntegrations.email) {
+        tools.push('envío de emails');
+    }
+    
+    if (config.integrationConfig.enabledIntegrations.calendar) {
+        tools.push('agendamiento de citas');
+    }
+    
+    if (tools.length === 0) return null;
+    
+    return `El agente puede hacer: ${tools.join(', ')}.`;
+}

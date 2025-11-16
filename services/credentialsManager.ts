@@ -490,3 +490,4 @@ export function getCredentialTypeLabel(type: CredentialType): string {
 
   return labels[type] || type;
 }
+

@@ -98,6 +98,63 @@ class RealDatabaseAuditor {
     detectedTools?: DetectedTool[],
     detectedSubflows?: DetectedSubflow[]
   ) {
+    // ========== VALIDACIÓN ROBUSTA ==========
+    console.log(`\n🔍 [DB Auditor] Validando configuración...`);
+
+    // Validación 1: Config existe
+    if (!config) {
+      const error = `Config is null/undefined for conversation ${conversationId}`;
+      console.error(`   ❌ ${error}`);
+      throw new Error(`[DB Auditor] ${error}`);
+    }
+
+    // Validación 2: Credentials exist
+    if (!config.credentials) {
+      const error = `Config.credentials is null/undefined`;
+      console.error(`   ❌ ${error}`);
+      console.error(`   Config recibido:`, JSON.stringify(config, null, 2).substring(0, 300));
+      throw new Error(`[DB Auditor] ${error}`);
+    }
+
+    // Validación 3: URL existe y es válida
+    if (!config.credentials.url) {
+      const error = `Supabase URL is missing`;
+      console.error(`   ❌ ${error}`);
+      console.error(`   Credentials:`, config.credentials);
+      throw new Error(`[DB Auditor] ${error}`);
+    }
+
+    if (!config.credentials.url.startsWith('http')) {
+      const error = `Supabase URL is invalid: ${config.credentials.url}`;
+      console.error(`   ❌ ${error}`);
+      throw new Error(`[DB Auditor] ${error}`);
+    }
+
+    // Validación 4: Key existe
+    if (!config.credentials.key) {
+      const error = `Supabase key is missing`;
+      console.error(`   ❌ ${error}`);
+      throw new Error(`[DB Auditor] ${error}`);
+    }
+
+    // Validación 5: Key es formato JWT (service_role)
+    if (!config.credentials.key.startsWith('eyJ')) {
+      console.warn(`   ⚠️ La key no parece ser JWT (service_role). RLS puede bloquear queries.`);
+      console.warn(`   Key comienza con: ${config.credentials.key.substring(0, 10)}...`);
+    }
+
+    // Validación 6: Tablas especificadas
+    if (!config.tables || config.tables.length === 0) {
+      console.warn(`   ⚠️ No se especificaron tablas para monitorear`);
+      config.tables = []; // Asegurar que sea array vacío en lugar de undefined
+    }
+
+    console.log(`   ✅ Configuración válida`);
+    console.log(`   URL: ${config.credentials.url}`);
+    console.log(`   Key: ${config.credentials.key.substring(0, 20)}...`);
+    console.log(`   Tablas: ${config.tables.join(', ')}`);
+    // ========================================
+    
     this.conversationId = conversationId;
     this.config = config;
     this.payload = payload;
@@ -400,15 +457,9 @@ class RealDatabaseAuditor {
         data[table] = rows;
         console.log(`   ✅ [${table}] ${rows.length} registros (${duration}ms)`);
         
-        // 🚨 ALERTA si 0 registros
+        // ℹ️ Info si 0 registros (normal al inicio de auditoría)
         if (rows.length === 0) {
-          console.warn(`\n   ⚠️⚠️⚠️ ADVERTENCIA: Tabla "${table}" devolvió 0 registros`);
-          console.warn(`   Esto IMPEDIRÁ el tracking de cambios en esta tabla`);
-          console.warn(`   Posibles causas:`);
-          console.warn(`     1. La tabla está vacía en la BD`);
-          console.warn(`     2. Row Level Security (RLS) está bloqueando la consulta`);
-          console.warn(`     3. Estás usando 'anon' key en vez de 'service_role' key`);
-          console.warn(`     4. No tienes permisos de lectura en esta tabla\n`);
+          console.log(`   ℹ️ Tabla "${table}" devolvió 0 registros (puede ser normal al inicio)`);
         }
       } catch (error) {
         console.error(`\n   ❌ [${table}] ERROR al consultar:`);
@@ -426,12 +477,16 @@ class RealDatabaseAuditor {
     const totalRecords = Object.values(data).reduce((sum, rows) => sum + rows.length, 0);
     console.log(`\n   📊 Snapshot #${this.snapshots.size} completado: ${totalRecords} registros totales en ${this.config.tables.length} tablas`);
     
-    // 🚨 ALERTA CRÍTICA si TODAS las tablas están en 0
-    if (totalRecords === 0) {
-      console.error(`\n   🚨🚨🚨 PROBLEMA CRÍTICO 🚨🚨🚨`);
-      console.error(`   TODAS las tablas devolvieron 0 registros`);
-      console.error(`   La auditoría de BD NO funcionará correctamente`);
-      console.error(`   ACCIÓN REQUERIDA: Verifica RLS y usa 'service_role' key\n`);
+    // ℹ️ Info si TODAS las tablas están en 0 (es normal en el primer snapshot)
+    if (totalRecords === 0 && this.snapshots.size > 1) {
+      // Solo advertir si ya pasó el primer snapshot y sigue en 0
+      console.warn(`\n   ⚠️ Todas las tablas siguen en 0 registros después de ${this.snapshots.size} snapshots`);
+      console.warn(`   Posibles causas:`);
+      console.warn(`     1. El agente no ha escrito en BD aún`);
+      console.warn(`     2. Row Level Security (RLS) está bloqueando la consulta`);
+      console.warn(`     3. Estás usando 'anon' key en vez de 'service_role' key\n`);
+    } else if (totalRecords === 0) {
+      console.log(`   ℹ️ Primer snapshot sin datos (normal al inicio de la auditoría)`);
     }
     
     return snapshot;

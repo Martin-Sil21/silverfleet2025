@@ -33,6 +33,7 @@ import {
   findMainModules,
   type CodeModule 
 } from './dependencyAnalyzer';
+import { analyzeUniversal, type UniversalAnalysis } from './universalCodeAnalyzer';
 
 interface ExtractedFile {
   path: string;
@@ -79,24 +80,39 @@ export async function analyzeCodeProject(zipBuffer: ArrayBuffer): Promise<Parsed
   // 6. Detectar herramientas externas
   const tools = detectTools(files, dependencies);
   
-  // 7. Detectar bases de datos
-  const databases = detectDatabases(files, dependencies);
+  // 7. 🌐 ANÁLISIS UNIVERSAL - Detecta CUALQUIER patrón (clases, funciones, wrappers, lo que sea)
+  console.log(`🌐 Running universal code analysis...`);
+  const universalAnalysis = analyzeUniversal(
+    files.map(f => ({ path: f.path, content: f.content })),
+    agents.map(a => ({ name: a.name, filePath: a.filePath }))
+  );
   
-  // 8. Detectar APIs externas
+  console.log(`   🤖 Detected ${universalAnalysis.agents.length} agents (methods, functions, files)`);
+  console.log(`   🗄️  Detected ${universalAnalysis.databaseAccesses.length} database accesses (direct & wrappers)`);
+  console.log(`   🔗 Mapped ${universalAnalysis.dataFlows.length} data flows`);
+  console.log(`   📋 Found ${universalAnalysis.tables.size} database tables`);
+  
+  // Combinar agentes detectados por AST con los del análisis universal
+  const allAgents = [...agents, ...convertUniversalAgentsToCodeAgents(universalAnalysis.agents, framework)];
+  
+  // 8. Detectar bases de datos (mejorado con análisis universal)
+  const databases = detectDatabasesEnhancedUniversal(files, dependencies, universalAnalysis);
+  
+  // 9. Detectar APIs externas
   const apis = detectAPIs(files, dependencies);
   
-  // 9. Detectar endpoints HTTP
+  // 10. Detectar endpoints HTTP
   const apiEndpoints = detectEndpoints(files);
   
-  // 10. Detectar variables de entorno
+  // 11. Detectar variables de entorno
   const environmentVariables = detectEnvironmentVariables(files);
   
   const result: ParsedCodeProject = {
     projectType: 'nodejs',
     framework,
     language: 'TypeScript/JavaScript',
-    confidence: calculateConfidence({ framework, agents, tools, databases, apis }),
-    agents,
+    confidence: calculateConfidence({ framework, agents: allAgents, tools, databases, apis }),
+    agents: allAgents,
     tools,
     databases,
     apis,
@@ -104,11 +120,46 @@ export async function analyzeCodeProject(zipBuffer: ArrayBuffer): Promise<Parsed
     scripts,
     fileCount: files.length,
     totalLines: calculateTotalLines(files),
-    summary: generateSummary({ agents, tools, databases, apis, framework }),
+    summary: generateSummary({ agents: allAgents, tools, databases, apis, framework }),
     apiEndpoints,
     environmentVariables,
-    agentDetectionType: AgentDetectionType.IMPLICIT,  // TODO: detectar dinámicamente
-    implicitAgentAnalysis: undefined,  // TODO: agregar análisis si necesario
+    agentDetectionType: AgentDetectionType.IMPLICIT,
+    implicitAgentAnalysis: undefined,
+    // 🔥 NUEVO: Análisis universal (funciona con CUALQUIER patrón)
+    deepAnalysis: {
+      hooks: [], // Ya no usamos hooks, usamos agentes universales
+      databaseQueries: universalAnalysis.databaseAccesses.map(access => ({
+        functionName: access.functionName,
+        filePath: access.filePath,
+        table: access.table || null,
+        queryType: access.operation,
+        fields: access.fields,
+        semanticContext: inferSemanticContext(access.table || '', access.fields)
+      })),
+      operations: universalAnalysis.dataFlows.map(flow => ({
+        agentName: flow.agent,
+        operation: flow.operation as any,
+        table: flow.table || '',
+        fields: [],
+        hookOrFunction: flow.viaFunction,
+        semanticContext: flow.operation
+      })),
+      dataFlow: universalAnalysis.dataFlows.map(flow => ({
+        from: flow.agent,
+        through: flow.viaFunction,
+        to: flow.toDatabase,
+        fields: [],
+        purpose: flow.operation
+      })),
+      tables: Array.from(universalAnalysis.tables.entries()).map(([name, info]) => ({
+        name,
+        operations: info.operations.map(op => ({
+          type: op as any,
+          usedBy: info.usedBy,
+          fields: info.fields
+        }))
+      }))
+    },
   };
   
   console.log(`✅ Project analysis completed in ${(performance.now() - startTime).toFixed(2)}ms`);
@@ -577,109 +628,218 @@ function extractAgentUseCases(content: string): { input?: string; output?: strin
 }
 
 /**
- * Detecta agentes IA en el código (VERSIÓN MEJORADA)
+ * Detecta agentes IA en el código (VERSIÓN MEJORADA - SIN DUPLICADOS)
  */
 function detectAgents(files: ExtractedFile[]): CodeAgentComponent[] {
+  console.log(`\n🤖 [Agent Detection] Iniciando detección de agentes...`);
+  console.log(`   Archivos a analizar: ${files.length}`);
+  
   const agents: CodeAgentComponent[] = [];
+  const processedFiles = new Set<string>();
+  const seenPrompts = new Set<string>();
   const processedNames = new Set<string>();
-
+  let detectionsCount = { gemini: 0, langchain: 0, openai: 0, custom: 0, skipped: 0 };
+  
   for (const file of files) {
-    if (!file.path.endsWith('.ts') && !file.path.endsWith('.js')) continue;
-
-    const content = file.content;
-    const lowerContent = content.toLowerCase();
-
-    // Buscar cualquier indicación de agente IA
-    const hasAgentKeyword = /(?:agent|bot|assistant|executor)\b/i.test(content);
-    const hasAILibrary = /(?:langchain|openai|anthropic|crewai|autogen|@google\/generative-ai|gemini)/i.test(content);
-    const hasSystemMessage = /(?:system_prompt|systemPrompt|systemMessage|instructions?|backstory)\b/i.test(content);
-
-    if (!hasAgentKeyword && !hasAILibrary && !hasSystemMessage) {
+    const ext = file.path.split('.').pop()?.toLowerCase();
+    
+    // SKIP archivos obvios que no son agentes
+    if (file.path.includes('node_modules') ||
+        file.path.includes('test') ||
+        file.path.includes('.test.') ||
+        file.path.includes('.spec.') ||
+        ext === 'json' ||
+        ext === 'md') {
+      detectionsCount.skipped++;
       continue;
     }
-
-    // Extraer nombre del agente
-    let agentName = 'Agent';
-
-    // Intentar múltiples patrones para nombre
-    const namePatterns = [
-      /export\s+(?:const|let|var)\s+(\w+Agent|\w+Bot|\w+Assistant|\w+Executor)\s*[:=]/i,
-      /(?:export\s+)?class\s+(\w+?)(?:Agent|Bot|Assistant|Handler|Executor)\b/i,
-      /(?:const|let|var)\s+(\w+Agent|\w+Bot|\w+Assistant)\s*=/i,
-      /new\s+(\w+Agent|\w+Bot|\w+Assistant)\s*\(/i,
-    ];
-
-    for (const pattern of namePatterns) {
-      const match = content.match(pattern);
-      if (match) {
-        agentName = match[1];
-        break;
+    
+    // SKIP si ya procesado
+    if (processedFiles.has(file.path)) {
+      detectionsCount.skipped++;
+      continue;
+    }
+    
+    let agentDetected = false;
+    const content = file.content;
+    
+    // ========== DETECTOR 1: Gemini (MÁS ESPECÍFICO) ==========
+    if (content.includes('GoogleGenAI') || 
+        content.includes('@google/generative-ai') ||
+        content.includes('genai.GenerativeModel')) {
+      
+      const systemPrompt = extractCompletePrompt(content);
+      
+      if (systemPrompt && systemPrompt.length > 30) {
+        // Verificar que no sea duplicado (por prompt)
+        const promptHash = systemPrompt.substring(0, 100);
+        if (!seenPrompts.has(promptHash)) {
+          const agentName = sanitizeAgentName(
+            file.name.replace(/\.(ts|js|py|tsx|jsx)$/i, '')
+          );
+          
+          if (!processedNames.has(agentName)) {
+            agents.push({
+              type: 'agent',
+              name: `${agentName} Agent`,
+              filePath: file.path,
+              systemPrompt,
+              description: `Gemini AI Agent from ${file.name}`,
+              imports: extractImports(content),
+            });
+            
+            seenPrompts.add(promptHash);
+            processedFiles.add(file.path);
+            processedNames.add(agentName);
+            detectionsCount.gemini++;
+            agentDetected = true;
+            console.log(`      ✅ Gemini agent: ${agentName} (${file.path})`);
+            continue;
+          }
+        } else {
+          console.log(`      ⏭️ Gemini agent duplicado: ${file.path}`);
+        }
       }
     }
-
-    // Evitar duplicados
-    if (processedNames.has(agentName)) {
-      continue;
+    
+    // ========== DETECTOR 2: LangChain ==========
+    if (!agentDetected && (content.includes('langchain') || 
+                           content.includes('ChatOpenAI') ||
+                           content.includes('ConversationChain'))) {
+      
+      const systemPrompt = extractCompletePrompt(content);
+      
+      if (systemPrompt && systemPrompt.length > 30) {
+        const promptHash = systemPrompt.substring(0, 100);
+        if (!seenPrompts.has(promptHash)) {
+          const agentName = sanitizeAgentName(
+            file.name.replace(/\.(ts|js|py|tsx|jsx)$/i, '')
+          );
+          
+          if (!processedNames.has(agentName)) {
+            agents.push({
+              type: 'agent',
+              name: `${agentName} Agent`,
+              filePath: file.path,
+              systemPrompt,
+              description: `LangChain Agent from ${file.name}`,
+              imports: extractImports(content),
+            });
+            
+            seenPrompts.add(promptHash);
+            processedFiles.add(file.path);
+            processedNames.add(agentName);
+            detectionsCount.langchain++;
+            agentDetected = true;
+            console.log(`      ✅ LangChain agent: ${agentName} (${file.path})`);
+            continue;
+          }
+        } else {
+          console.log(`      ⏭️ LangChain agent duplicado: ${file.path}`);
+        }
+      }
     }
-
-    // Extraer información detallada del agente
-    const systemPrompt = extractCompletePrompt(content);
-    const framework = identifyAgentFramework(file, content);
-    const tools = extractAgentTools(content);
-    const intention = extractAgentIntention(content, agentName);
-    const responsibilities = extractAgentResponsibilities(content);
-    const agentDatabases = detectAgentDatabases(content);
-    const useCases = extractAgentUseCases(content);
-
-    // Validar que es realmente un agente
-    const isValid = isValidAgent(content, !!systemPrompt);
-
-    if (!isValid) {
-      continue; // No es un agente válido
+    
+    // ========== DETECTOR 3: OpenAI SDK directo ==========
+    if (!agentDetected && (content.includes('openai') || 
+                           content.includes('ChatCompletionMessage'))) {
+      
+      const systemPrompt = extractCompletePrompt(content);
+      
+      if (systemPrompt && systemPrompt.length > 30) {
+        const promptHash = systemPrompt.substring(0, 100);
+        if (!seenPrompts.has(promptHash)) {
+          const agentName = sanitizeAgentName(
+            file.name.replace(/\.(ts|js|py|tsx|jsx)$/i, '')
+          );
+          
+          if (!processedNames.has(agentName)) {
+            agents.push({
+              type: 'agent',
+              name: `${agentName} Agent`,
+              filePath: file.path,
+              systemPrompt,
+              description: `OpenAI Agent from ${file.name}`,
+              imports: extractImports(content),
+            });
+            
+            seenPrompts.add(promptHash);
+            processedFiles.add(file.path);
+            processedNames.add(agentName);
+            detectionsCount.openai++;
+            agentDetected = true;
+            console.log(`      ✅ OpenAI agent: ${agentName} (${file.path})`);
+            continue;
+          }
+        } else {
+          console.log(`      ⏭️ OpenAI agent duplicado: ${file.path}`);
+        }
+      }
     }
-
-    // Construir descripción detallada
-    let description = `AI Agent (${framework || 'Custom'})`;
-    if (intention) {
-      description += ` - ${intention}`;
+    
+    // ========== DETECTOR 4: Custom agents (SOLO si no detectado antes) ==========
+    if (!agentDetected && !processedFiles.has(file.path)) {
+      const systemPrompt = extractCompletePrompt(content);
+      
+      // UMBRAL MÁS ALTO: 150 chars (era 50)
+      if (systemPrompt && systemPrompt.length > 150) {
+        const promptHash = systemPrompt.substring(0, 100);
+        
+        if (!seenPrompts.has(promptHash)) {
+          const agentName = sanitizeAgentName(
+            file.name.replace(/\.(ts|js|py|tsx|jsx)$/i, '')
+          );
+          
+          if (!processedNames.has(agentName)) {
+            agents.push({
+              type: 'agent',
+              name: `${agentName} Agent`,
+              filePath: file.path,
+              systemPrompt,
+              description: `Custom agent detected from ${file.name}`,
+              imports: extractImports(content),
+              confidence: 0.7,
+              framework: 'Custom Agent Pattern',
+            });
+            
+            seenPrompts.add(promptHash);
+            processedFiles.add(file.path);
+            processedNames.add(agentName);
+            detectionsCount.custom++;
+            console.log(`      ✅ Custom agent: ${agentName} (${file.path})`);
+          }
+        } else {
+          console.log(`      ⏭️ Custom agent duplicado: ${file.path}`);
+        }
+      }
     }
-    if (tools.length > 0) {
-      description += ` | Tools: ${tools.join(', ')}`;
-    }
-    if (agentDatabases.length > 0) {
-      description += ` | DB: ${agentDatabases.join(', ')}`;
-    }
-
-    const agent: CodeAgentComponent = {
-      type: 'agent',
-      name: agentName,
-      filePath: file.path,
-      systemPrompt: systemPrompt || `You are ${agentName}.`,
-      description: description.substring(0, 500),
-      imports: extractImports(content),
-    };
-
-    // Agregar campos extra (metadata)
-    (agent as any).framework = framework;
-    (agent as any).tools = tools;
-    (agent as any).intention = intention;
-    (agent as any).responsibilities = responsibilities;
-    (agent as any).databases = agentDatabases;
-    (agent as any).useCases = useCases;
-    (agent as any).fullContent = content; // Para análisis posterior
-
-    agents.push(agent);
-    processedNames.add(agentName);
-
-    console.log(`✅ Agent detectado: ${agentName}`);
-    console.log(`   Framework: ${framework}`);
-    console.log(`   Intention: ${intention?.substring(0, 100)}...`);
-    console.log(`   Tools: ${tools.join(', ') || 'None'}`);
-    console.log(`   Databases: ${agentDatabases.join(', ') || 'None'}`);
-    console.log(`   Responsibilities: ${responsibilities.slice(0, 3).join(', ')}`);
   }
-
+  
+  console.log(`\n   📊 Detección completa:`);
+  console.log(`      Gemini: ${detectionsCount.gemini}`);
+  console.log(`      LangChain: ${detectionsCount.langchain}`);
+  console.log(`      OpenAI: ${detectionsCount.openai}`);
+  console.log(`      Custom: ${detectionsCount.custom}`);
+  console.log(`      Skipped: ${detectionsCount.skipped}`);
+  console.log(`      TOTAL AGENTES: ${agents.length}\n`);
+  
   return agents;
+}
+
+/**
+ * Sanitiza nombre de agente (elimina caracteres raros)
+ */
+function sanitizeAgentName(name: string): string {
+  return name
+    .replace(/[,._-]+/g, ' ')       // Remover caracteres especiales
+    .replace(/\s+/g, ' ')            // Normalizar espacios
+    .replace(/output\s+/gi, '')      // Remover "output" si está solo
+    .replace(/index\s+/gi, '')       // Remover "index" si está solo
+    .trim()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+    .replace(/\s+Agent\s+Agent/gi, ' Agent'); // Evitar "Agent Agent"
 }
 
 /**
@@ -927,6 +1087,87 @@ function detectDatabases(
   }
 
   return Array.from(databases.values());
+}
+
+/**
+ * Infiere el contexto semántico basado en nombres de tablas y campos
+ */
+function inferSemanticContext(tableName: string, fields: string[]): string {
+  const lower = tableName.toLowerCase();
+  const fieldStr = fields.join(',').toLowerCase();
+  
+  if (/price|precio|cost|costo/.test(lower) || /price|precio/.test(fieldStr)) {
+    return 'pricing';
+  }
+  if (/product|producto|item/.test(lower)) {
+    return 'products';
+  }
+  if (/chat|message|conversation|memoria/.test(lower)) {
+    return 'conversations';
+  }
+  if (/user|usuario|customer|cliente/.test(lower)) {
+    return 'users';
+  }
+  if (/order|pedido|venta/.test(lower)) {
+    return 'orders';
+  }
+  if (/resumen|summary/.test(lower)) {
+    return 'summaries';
+  }
+  
+  return 'general';
+}
+
+/**
+ * Convierte agentes universales a CodeAgentComponent
+ */
+function convertUniversalAgentsToCodeAgents(
+  universalAgents: any[],
+  framework?: DetectedFramework
+): CodeAgentComponent[] {
+  return universalAgents.map(agent => ({
+    type: 'agent' as const,
+    name: agent.name,
+    filePath: agent.filePath,
+    systemPrompt: agent.systemPrompt || `Agent detected via ${agent.detectionMethod}`,
+    description: agent.description || `Agent detected as ${agent.detectionMethod}`,
+    imports: [],
+    confidence: agent.confidence,
+    framework: framework?.name || 'Unknown',
+    detectionMethod: agent.detectionMethod
+  }));
+}
+
+/**
+ * Detecta bases de datos con análisis universal mejorado
+ */
+function detectDatabasesEnhancedUniversal(
+  files: ExtractedFile[],
+  dependencies: Record<string, string>,
+  universalAnalysis: UniversalAnalysis
+): DetectedDatabase[] {
+  // Primero obtener detección básica
+  const basicDatabases = detectDatabases(files, dependencies);
+  
+  // Mejorar con información del análisis universal
+  const enhancedDatabases = basicDatabases.map(db => {
+    // Convertir Map a Array para iterar
+    const tablesArray = Array.from(universalAnalysis.tables.entries());
+    
+    return {
+      ...db,
+      // 🔥 NUEVO: Agregar información detallada de tablas
+      tables: tablesArray.map(([name]) => name),
+      tableDetails: tablesArray.map(([name, info]) => ({
+        name,
+        operations: info.operations,
+        usedBy: info.usedBy,
+        fields: info.fields
+      })),
+    };
+  });
+  
+  return enhancedDatabases;
 }
 
 /**

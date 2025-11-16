@@ -14,6 +14,10 @@ import type { AuditConfig, ParsedN8nWorkflow, WorkflowNode, N8nConnection, Histo
 import Card from './Card';
 // @ts-ignore - Force reload
 import { PayloadEditor } from './PayloadEditor';
+import { DatabaseWrappersViewer } from './DatabaseWrappersViewer';
+import { ZipTestButton } from './ZipTestButton';
+import { DetailedAgentViewer } from './DetailedAgentViewer';
+import { DetailedDatabaseViewer } from './DetailedDatabaseViewer';
 import { parseN8nWorkflow } from '../services/n8nParser';
 import { useTranslation } from '../hooks/useTranslation';
 import { suggestAuditCriteria, generateSamplePayload } from '../services/geminiService';
@@ -266,23 +270,24 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
           });
         }
         
-        // 3. 🔧 Usar criterios por defecto (generales y efectivos)
-        // Los criterios generados por IA para ZIP son demasiado específicos y poco útiles
-        console.log('✅ Usando criterios por defecto generales');
-        setCriteria(DEFAULT_CRITERIA);
+        // 3. 🔥 Generar criterios inteligentes basados en los agentes detectados
+        setIsSuggestingCriteria(true);
+        try {
+          console.log('🔄 Generando criterios desde prompts de agentes...');
+          const suggested = await suggestAuditCriteria(workflowNodes, connections, language);
+          const combined = [...DEFAULT_CRITERIA, ...suggested];
+          const uniqueCriteria = [...new Set(combined)];
+          setCriteria(uniqueCriteria);
+          console.log(`✅ Criterios generados: ${uniqueCriteria.length} total`);
+        } catch (criteriaError) {
+          console.warn('⚠️ Error generando criterios, usando defaults:', criteriaError);
+          setCriteria(DEFAULT_CRITERIA);
+        }
         setIsSuggestingCriteria(false);
         
-        // 4. Generar payload específico para ZIP
-        try {
-          console.log('🔄 Generando payload...');
-          const payload = await generateZipProjectPayload(codeProject, language);
-          setSamplePayload(payload);
-          setRawPayloadText(JSON.stringify(payload, null, 2));
-          console.log('✅ Payload generado');
-        } catch (payloadError) {
-          console.warn('⚠️ Error generando payload:', payloadError);
-          setSamplePayload({ conversationId: `conv_${Date.now()}`, message: 'Test message' });
-        }
+        // 4. NO auto-generar payload para ZIP - esperar a que el usuario presione "Generar"
+        // (Evita generar 2 veces y permite al usuario revisar antes)
+        console.log('✅ Listo para generar payload cuando presiones el botón');
         
       } catch (error) {
         console.error('❌ Error procesando ZIP project:', error);
@@ -370,14 +375,37 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   };
 
   const handleGeneratePayload = async (wf?: WorkflowNode[], conns?: N8nConnection[]) => {
-    const workflowToUse = wf || workflow;
-    const connsToUse = conns || connections;
-
-    if (!workflowToUse || workflowToUse.length === 0 || !connsToUse) return;
-
     setIsGeneratingPayload(true);
     setPayloadError(null);
+    
     try {
+      // 🔥 DECISIÓN: ¿Es proyecto ZIP o n8n?
+      if (codeProject) {
+        // ===== PROYECTO ZIP =====
+        console.log('🔄 Generando payload para proyecto ZIP con IA...');
+        const payload = await generateZipProjectPayload(codeProject, language);
+        setSamplePayload(payload);
+        setRawPayloadText(JSON.stringify(payload, null, 2));
+        console.log('✅ Payload ZIP generado:', payload);
+        return;
+      }
+      
+      // ===== PROYECTO N8N =====
+      const workflowToUse = wf || workflow;
+      const connsToUse = conns || connections;
+
+      if (!workflowToUse || workflowToUse.length === 0 || !connsToUse) {
+        console.warn('⚠️ No hay workflow cargado, usando payload default');
+        const defaultPayload = {
+          "input": "Hola Martín. Precisamente, donde perdemos mucho tiempo y recursos es en la calificación inicial de los leads que llegan por el formulario de la web. Muchos no cumplen con el perfil que buscamos o no tienen una necesidad inmediata.",
+          "nombre": "Javier Fernández",
+          "telefonos": "+5491167890123"
+        };
+        setSamplePayload(defaultPayload);
+        setRawPayloadText(JSON.stringify(defaultPayload, null, 2));
+        return;
+      }
+
       // Strategy 1: Extract from second node
       if (parsedN8nData && parsedN8nData.rawNodes && parsedN8nData.rawNodes.length >= 2) {
         console.log('🔍 Extracting payload from second node...');
@@ -387,32 +415,20 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
           console.log('✅ Payload extracted from workflow:', payloadSchema.examplePayload);
           setSamplePayload(payloadSchema.examplePayload);
           setRawPayloadText(JSON.stringify(payloadSchema.examplePayload, null, 2));
-          setIsGeneratingPayload(false);
           return;
         }
       }
-      
-      // Strategy 2: Use default payload
-      console.log('📝 Using default payload template');
-      const defaultPayload = {
-        "input": "Hola Martín. Precisamente, donde perdemos mucho tiempo y recursos es en la calificación inicial de los leads que llegan por el formulario de la web. Muchos no cumplen con el perfil que buscamos o no tienen una necesidad inmediata.",
-        "nombre": "Javier Fernández",
-        "telefonos": "+5491167890123"
-      };
-      setSamplePayload(defaultPayload);
-      setRawPayloadText(JSON.stringify(defaultPayload, null, 2));
-      setIsGeneratingPayload(false);
+
+      // Strategy 2 (fallback): Use Gemini AI
+      console.log('🤖 Generating payload with Gemini AI...');
+      const payload = await generateSamplePayload(workflowToUse, connsToUse, language);
+      setSamplePayload(payload);
+      setRawPayloadText(JSON.stringify(payload, null, 2));
       
     } catch (error) {
-      // Fallback to default payload on error
-      const defaultPayload = {
-        "input": "Hola Martín. Precisamente, donde perdemos mucho tiempo y recursos es en la calificación inicial de los leads que llegan por el formulario de la web. Muchos no cumplen con el perfil que buscamos o no tienen una necesidad inmediata.",
-        "nombre": "Javier Fernández",
-        "telefonos": "+5491167890123"
-      };
-      setSamplePayload(defaultPayload);
-      setRawPayloadText(JSON.stringify(defaultPayload, null, 2));
-      console.log('✅ Using default payload after error');
+      const message = error instanceof Error ? error.message : "Could not generate payload.";
+      setPayloadError(message);
+      console.error('❌ Error generando payload:', error);
     } finally {
       setIsGeneratingPayload(false);
     }
@@ -849,6 +865,28 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
               )}
             </div>
           </Card>
+          
+          {/* 🧪 NUEVO: Botón de Testing Exhaustivo */}
+          <ZipTestButton 
+            codeProject={codeProject} 
+            projectName={codeProject.framework?.name || 'project'} 
+          />
+          
+          {/* 🔥 NUEVO: Database Wrappers y Flujo de Datos */}
+          <DatabaseWrappersViewer project={codeProject} />
+          
+          {/* 🔬 ANÁLISIS DETALLADO: Agentes detectados con prompts completos */}
+          <Card>
+            <DetailedAgentViewer agents={codeProject.agents} />
+          </Card>
+          
+          {/* 💾 ANÁLISIS DETALLADO: Bases de datos con tablas y operaciones */}
+          <Card>
+            <DetailedDatabaseViewer 
+              databases={codeProject.databases}
+              deepAnalysis={codeProject.deepAnalysis}
+            />
+          </Card>
 
           {/* CARD 2: Payload de Entrada */}
           <Card>
@@ -1114,6 +1152,24 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   };
 
   const renderStep2 = () => {
+    // 🔥 Para proyectos ZIP, los subflows no aplican - skip este step silenciosamente
+    if (codeProject) {
+      return (
+        <Card>
+          <div className="text-center py-12">
+            <CheckCircleIcon className="w-16 h-16 text-green-500 mx-auto mb-4" />
+            <h3 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
+              ✅ Análisis de Código Completo
+            </h3>
+            <p className="text-gray-600 dark:text-gray-400">
+              Los proyectos ZIP no requieren configuración de subflujos. Continúa al siguiente paso.
+            </p>
+          </div>
+        </Card>
+      );
+    }
+    
+    // Para proyectos n8n sin subflows
     if (!dependencies || dependencies.subflows.length === 0) {
       return (
         <Card>
@@ -1624,15 +1680,37 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
               : dbCredentials.get(modalConfig.nodeId)
           }
           workflowTables={
-            modalConfig.category === 'db' && rawN8nJson
+            modalConfig.category === 'db'
               ? (() => {
-                  try {
-                    const parsed = JSON.parse(rawN8nJson);
-                    const dbInfo = require('../services/workflowDatabaseAnalyzer').analyzeWorkflowDatabases(parsed.nodes || []);
-                    return dbInfo.tables || [];
-                  } catch {
-                    return [];
+                  // 🔥 CASO 1: Proyecto ZIP - extraer tablas de codeProject
+                  if (codeProject && codeProject.databases.length > 0) {
+                    const allTables: string[] = [];
+                    codeProject.databases.forEach(db => {
+                      const dbTables = (db as any).tables || [];
+                      dbTables.forEach((table: any) => {
+                        const tableName = typeof table === 'string' ? table : table.name;
+                        if (tableName && !allTables.includes(tableName)) {
+                          allTables.push(tableName);
+                        }
+                      });
+                    });
+                    console.log(`🔧 [Credential Modal] Tablas ZIP detectadas:`, allTables);
+                    return allTables;
                   }
+                  
+                  // 🔥 CASO 2: Proyecto n8n - extraer de rawN8nJson
+                  if (rawN8nJson) {
+                    try {
+                      const parsed = JSON.parse(rawN8nJson);
+                      const dbInfo = require('../services/workflowDatabaseAnalyzer').analyzeWorkflowDatabases(parsed.nodes || []);
+                      console.log(`🔧 [Credential Modal] Tablas n8n detectadas:`, dbInfo.tables);
+                      return dbInfo.tables || [];
+                    } catch {
+                      return [];
+                    }
+                  }
+                  
+                  return [];
                 })()
               : []
           }

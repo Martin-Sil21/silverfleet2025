@@ -33,6 +33,73 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<'overview' | 'objectives' | 'prices' | 'database' | 'conversations' | 'ai-report'>('overview');
 
+  // ========== VALIDACIÓN DE DATOS ==========
+  React.useEffect(() => {
+    console.log('\n📊 [ExecutiveReport] Validando datos recibidos...');
+    console.log(`   Results recibidos: ${results.length}`);
+    
+    if (results.length === 0) {
+      console.error(`   ❌ CRÍTICO: No hay resultados para mostrar`);
+      return;
+    }
+    
+    const validation = {
+      total: results.length,
+      withAnalysis: 0,
+      withDatabase: 0,
+      withToolVerifications: 0,
+      errors: [] as string[]
+    };
+    
+    results.forEach((result, idx) => {
+      console.log(`\n   Resultado ${idx + 1}/${results.length}:`);
+      console.log(`      testCase: "${result.testCase?.title || 'SIN TÍTULO'}"`);
+      console.log(`      analysis: ${result.analysis ? '✓' : '✗'}`);
+      console.log(`      databaseActivity: ${result.databaseActivity ? '✓' : '✗'}`);
+      console.log(`      toolVerifications: ${result.toolVerifications?.length || 0}`);
+      console.log(`      executionTrace: ${result.executionTrace?.length || 0} steps`);
+      
+      // Contar
+      if (result.analysis) validation.withAnalysis++;
+      if (result.databaseActivity) validation.withDatabase++;
+      if (result.toolVerifications && result.toolVerifications.length > 0) {
+        validation.withToolVerifications++;
+      }
+      
+      // Detectar problemas
+      if (!result.analysis) {
+        const error = `Resultado ${idx + 1} ("${result.testCase?.title}") falta analysis`;
+        validation.errors.push(error);
+        console.error(`      ❌ ${error}`);
+      }
+      
+      if (!result.analysis?.criteriaBreakdown || result.analysis.criteriaBreakdown.length === 0) {
+        const error = `Resultado ${idx + 1} analysis.criteriaBreakdown vacío`;
+        validation.errors.push(error);
+        console.warn(`      ⚠️ ${error}`);
+      }
+      
+      if (!result.databaseActivity) {
+        console.warn(`      ⚠️ Sin actividad de BD registrada`);
+      }
+    });
+    
+    console.log(`\n   📊 Resumen de validación:`);
+    console.log(`      Total resultados: ${validation.total}`);
+    console.log(`      Con analysis: ${validation.withAnalysis}/${validation.total}`);
+    console.log(`      Con BD: ${validation.withDatabase}/${validation.total}`);
+    console.log(`      Con tools: ${validation.withToolVerifications}/${validation.total}`);
+    
+    if (validation.errors.length > 0) {
+      console.error(`\n   ❌ ERRORES ENCONTRADOS (${validation.errors.length}):`);
+      validation.errors.forEach(err => console.error(`      - ${err}`));
+    } else {
+      console.log(`\n   ✅ Todos los datos están presentes`);
+    }
+    
+  }, [results]);
+  // ========================================
+
   const toggleCard = (id: string) => {
     const newSet = new Set(expandedCards);
     if (newSet.has(id)) {
@@ -70,6 +137,15 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
 
   const colors = getScoreColor(stats.avgScore);
   
+  // Obtener resumen de costos
+  const costSummary = useMemo(() => {
+    try {
+      return getCostSummary();
+    } catch (e) {
+      return null; // Si no hay datos de costos, no mostrar sección
+    }
+  }, []);
+
   // Tab Button Component
   const ReportTabButton: React.FC<{ 
     active: boolean; 
@@ -97,25 +173,16 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
         )}
     </button>
   );
-  
-  // Obtener resumen de costos
-  const costSummary = useMemo(() => {
-    try {
-      return getCostSummary();
-    } catch (e) {
-      return null; // Si no hay datos de costos, no mostrar sección
-    }
-  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-gray-900 dark:via-gray-800 dark:to-slate-900 p-4 sm:p-6 lg:p-8">
-      {/* Header con mejor diseño - Ancho optimizado */}
+      {/* Header con mejor diseño - Ancho reducido 30% más para mejor legibilidad */}
       <div className="max-w-4xl mx-auto mb-6 sm:mb-8">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
           <div>
             <h1 className="text-3xl sm:text-4xl font-bold text-gray-900 dark:text-white mb-2 flex items-center gap-3">
               <span className="text-4xl sm:text-5xl">📊</span>
-              <span>Reporte Final</span>
+              <span>Reporte Final de Auditoría</span>
             </h1>
             <p className="text-sm sm:text-base text-gray-600 dark:text-gray-400">
               Análisis completo de {results.length} conversacion{results.length > 1 ? 'es' : ''}
@@ -129,7 +196,7 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
                 title="Ejecuta nuevamente con la misma configuración sin editar"
               >
                 <span className="text-xl">🔁</span>
-                <span>Repetir Auditoría</span>
+                <span>Repetir</span>
               </button>
             )}
             <button
@@ -145,17 +212,17 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
               className="px-4 sm:px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all duration-200 font-medium flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
             >
               <span className="text-xl">←</span>
-              <span>Nueva Auditoría</span>
+              <span>Nueva</span>
             </button>
           </div>
         </div>
         
         {/* Tabs Horizontales */}
-        <div className="flex gap-1 border-b-2 border-gray-300 dark:border-gray-600 overflow-x-auto bg-gray-100 dark:bg-gray-800 rounded-t-xl p-1 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700 scrollbar-track-transparent">
+        <div className="flex gap-1 border-b-2 border-gray-300 dark:border-gray-600 overflow-x-auto bg-gray-100 dark:bg-gray-800 rounded-t-xl p-1">
           <ReportTabButton 
             active={activeTab === 'overview'} 
             icon="📈" 
-            label="Resumen"
+            label="Resumen General"
             onClick={() => setActiveTab('overview')}
           />
           <ReportTabButton 
@@ -175,7 +242,7 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
           <ReportTabButton 
             active={activeTab === 'database'} 
             icon="🗄️" 
-            label="Base Datos"
+            label="Base de Datos"
             count={stats.totalDbChanges}
             onClick={() => setActiveTab('database')}
           />
@@ -192,16 +259,16 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
             onClick={() => setActiveTab('ai-report')}
           />
         </div>
-        
-        {/* Tab Content Container */}
-        <div className="bg-white dark:bg-gray-800 rounded-b-2xl rounded-tr-2xl shadow-2xl border-2 border-t-0 border-gray-300 dark:border-gray-600 p-6 sm:p-8 min-h-[600px] max-h-[80vh] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700 scrollbar-track-transparent">
+
+        {/* Tab Content */}
+        <div className="bg-white dark:bg-gray-800 rounded-b-2xl rounded-tr-2xl shadow-2xl border-2 border-t-0 border-gray-300 dark:border-gray-600 p-6 sm:p-8 min-h-[600px] scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700 scrollbar-track-transparent max-h-[80vh] overflow-y-auto">
           
           {/* OVERVIEW TAB */}
           {activeTab === 'overview' && (
             <div className="space-y-6">
               {/* Resumen Ejecutivo - Rediseñado */}
               <div className={`bg-gradient-to-br ${colors.bg} rounded-2xl p-6 sm:p-8 border-2 ${colors.border} transition-all duration-300`}>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
             {/* Score General - Más destacado */}
             <div className="col-span-2 md:col-span-1 text-center bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-600 rounded-xl p-4 sm:p-6 border-2 border-gray-200 dark:border-gray-600 transition-transform duration-200 hover:scale-105">
               <div className="text-5xl sm:text-6xl mb-2">
@@ -327,19 +394,22 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
             </div>
           </div>
         </div>
-        
+      
         {/* MÉTRICAS PROFESIONALES */}
-        <div className="bg-gray-50 dark:bg-gray-700/30 rounded-2xl p-6 border border-gray-200 dark:border-gray-700">
-          <div className="flex items-center gap-3 mb-4">
-            <span className="text-3xl">📊</span>
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Métricas de Auditoría</h2>
+        <div className="mt-6">
+          <div className="bg-gray-50 dark:bg-gray-700/30 rounded-2xl p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">📊</span>
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">Métricas de Auditoría</h2>
+            </div>
+            <AuditMetrics results={results} config={config} />
           </div>
-          <AuditMetrics results={results} config={config} />
         </div>
 
         {/* Resumen de Costos */}
         {costSummary && costSummary.totalCostUSD > 0 && (
-          <div className="bg-gradient-to-r from-yellow-50 via-amber-50 to-orange-50 dark:from-yellow-900/20 dark:via-amber-900/20 dark:to-orange-800/20 rounded-2xl p-6 border-2 border-yellow-300 dark:border-yellow-600">
+          <div className="mt-6">
+            <div className="bg-gradient-to-r from-yellow-50 via-amber-50 to-orange-50 dark:from-yellow-900/20 dark:via-amber-900/20 dark:to-orange-800/20 rounded-2xl p-6 border-2 border-yellow-300 dark:border-yellow-600">
             <div className="flex items-center gap-3 mb-6">
               <span className="text-4xl sm:text-5xl">💰</span>
               <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Resumen de Costos API</h2>
@@ -439,202 +509,11 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
           </div>
         )}
               </div>
-            )}
-            
-            {/* OBJECTIVES TAB - Cumplimiento de Objetivos */}
-            {activeTab === 'objectives' && (
-              <div className="space-y-4">
-                <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                  <span className="text-3xl">🎯</span>
-                  Cumplimiento de Objetivos
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {results.map((result) => {
-                    const score = result.analysis?.overallScore || 0;
-                    const achieved = score >= 7;
-                    return (
-                      <div key={result.id} className={`rounded-xl p-6 border-2 ${achieved ? 'bg-green-50 dark:bg-green-900/20 border-green-400' : 'bg-red-50 dark:bg-red-900/20 border-red-400'}`}>
-                        <div className="flex items-start gap-3 mb-3">
-                          <span className="text-4xl">{achieved ? '✅' : '❌'}</span>
-                          <div className="flex-1">
-                            <h4 className="font-bold text-lg text-gray-900 dark:text-white">{result.testCase.title}</h4>
-                            <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{result.testCase.conversationGoal}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-300 dark:border-gray-600">
-                          <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Score:</span>
-                          <span className={`text-2xl font-bold ${score >= 8 ? 'text-green-600' : score >= 5 ? 'text-yellow-600' : 'text-red-600'}`}>{score.toFixed(1)}/10</span>
-                        </div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                          💬 {results.find(r => r.id === result.id)?.executionTrace.length || 0} turnos • 
-                          🗄️ {results.find(r => r.id === result.id)?.databaseActivity?.changes?.length || 0} cambios BD
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            
-            {/* PRICES TAB - Errores de Precios */}
-            {activeTab === 'prices' && (
-              <div className="space-y-4">
-                <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                  <span className="text-3xl">💰</span>
-                  Análisis de Precios vs Base de Datos
-                </h3>
-                {stats.totalDbErrors === 0 ? (
-                  <div className="bg-green-50 dark:bg-green-900/20 rounded-2xl p-12 text-center border-2 border-green-400">
-                    <div className="text-8xl mb-4">✅</div>
-                    <h4 className="text-2xl font-bold text-green-800 dark:text-green-200 mb-2">¡Todos los Precios Correctos!</h4>
-                    <p className="text-green-700 dark:text-green-300">No se detectaron errores de precio en ninguna conversación</p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {results.map((result) => {
-                      const priceErrors = result.databaseActivity?.discrepancies?.filter(d => d.type === 'incorrect_data') || [];
-                      if (priceErrors.length === 0) return null;
-                      
-                      return (
-                        <div key={result.id} className="bg-white dark:bg-gray-800 rounded-xl p-6 border-2 border-red-300 dark:border-red-700">
-                          <h4 className="font-bold text-lg text-red-800 dark:text-red-200 mb-4">{result.testCase.title}</h4>
-                          <div className="space-y-3">
-                            {priceErrors.map((error, idx) => (
-                              <div key={idx} className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4">
-                                <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">{error.description}</p>
-                                <div className="grid grid-cols-2 gap-4 mt-2">
-                                  <div>
-                                    <p className="text-xs text-red-600 dark:text-red-400 font-semibold">Bot Ofreció:</p>
-                                    <p className="text-xl font-bold text-red-700 dark:text-red-300">${error.expected}</p>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs text-green-600 dark:text-green-400 font-semibold">Precio Real:</p>
-                                    <p className="text-xl font-bold text-green-700 dark:text-green-300">${error.actual}</p>
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-            
-            {/* DATABASE TAB - Actividad de Base de Datos */}
-            {activeTab === 'database' && (
-              <div className="space-y-4">
-                <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                  <span className="text-3xl">🗄️</span>
-                  Actividad de Base de Datos
-                </h3>
-                <div className="grid grid-cols-3 gap-4 mb-6">
-                  <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-6 text-center border-2 border-blue-300">
-                    <p className="text-4xl font-bold text-blue-600">{stats.totalDbOperations}</p>
-                    <p className="text-sm text-blue-700 dark:text-blue-300 font-semibold mt-2">Operaciones Totales</p>
-                  </div>
-                  <div className="bg-purple-50 dark:bg-purple-900/20 rounded-xl p-6 text-center border-2 border-purple-300">
-                    <p className="text-4xl font-bold text-purple-600">{stats.totalDbChanges}</p>
-                    <p className="text-sm text-purple-700 dark:text-purple-300 font-semibold mt-2">Cambios Registrados</p>
-                  </div>
-                  <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-6 text-center border-2 border-red-300">
-                    <p className="text-4xl font-bold text-red-600">{stats.totalDbErrors}</p>
-                    <p className="text-sm text-red-700 dark:text-red-300 font-semibold mt-2">Errores Críticos</p>
-                  </div>
-                </div>
-                <div className="bg-gray-50 dark:bg-gray-700/30 rounded-xl p-6">
-                  <p className="text-gray-600 dark:text-gray-400">Detalles de actividad de base de datos por conversación disponibles en la pestaña de Conversaciones</p>
-                </div>
-              </div>
-            )}
-            
-            {/* CONVERSATIONS TAB - Detalle de Cada Conversación */}
-            {activeTab === 'conversations' && (
-      <div className="space-y-4">
-        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white flex items-center gap-3 px-2">
-          <span className="text-3xl sm:text-4xl">💬</span>
-          <span>Detalle de Conversaciones</span>
-        </h2>
-        
-        {results.map((result, idx) => {
-          const isExpanded = expandedCards.has(result.id);
-          const cardColors = getScoreColor(result.analysis.overallScore);
-          const hasDbErrors = (result.databaseActivity?.discrepancies?.length || 0) > 0;
-          const criticalErrors = result.databaseActivity?.discrepancies?.filter(d => d.severity === 'critical') || [];
-
-          return (
-            <div
-              key={result.id}
-              className={`bg-white dark:bg-gray-800 rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-300 overflow-hidden border-2 ${cardColors.border} ${isExpanded ? 'ring-4 ring-blue-200 dark:ring-blue-800' : ''}`}
-            >
-              {/* Header Colapsable - Mejorado */}
-              <button
-                onClick={() => toggleCard(result.id)}
-                className="w-full p-5 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-750 transition-all duration-200 gap-4"
-              >
-                <div className="flex items-start sm:items-center gap-4 flex-1 w-full">
-                  {/* Score Badge - Más grande y visual */}
-                  <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl ${cardColors.bg} flex flex-col items-center justify-center font-bold shadow-xl border-2 ${cardColors.border} transition-transform duration-200 hover:scale-110 flex-shrink-0`}>
-                    <div className="text-3xl sm:text-4xl">{getScoreEmoji(result.analysis.overallScore)}</div>
-                    <div className="text-lg sm:text-xl font-black">{result.analysis.overallScore.toFixed(1)}</div>
-                  </div>
-
-                  {/* Info - Mejor organizada */}
-                  <div className="flex-1 text-left min-w-0">
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
-                      <h3 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white truncate">
-                        {result.testCase.title}
-                      </h3>
-                      {hasDbErrors && (
-                        <span className="px-3 py-1.5 bg-gradient-to-r from-red-500 to-pink-500 text-white text-xs font-bold rounded-lg shadow-md animate-pulse flex items-center gap-1 w-fit">
-                          <span>⚠️</span>
-                          <span>{criticalErrors.length} ERROR{criticalErrors.length > 1 ? 'ES' : ''}</span>
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">
-                      {result.analysis.summary.split('\n\n')[0]}
-                    </p>
-                    <div className="flex gap-2 mt-3 flex-wrap">
-                      <span className="px-2.5 py-1 bg-gradient-to-r from-gray-100 to-gray-200 dark:from-gray-700 dark:to-gray-600 text-gray-700 dark:text-gray-200 text-xs rounded-lg font-medium shadow-sm">
-                        📱 {result.testCase.initialPayload?.telefono || 'N/A'}
-                      </span>
-                      <span className="px-2.5 py-1 bg-gradient-to-r from-blue-100 to-indigo-100 dark:from-blue-900 dark:to-indigo-900 text-blue-700 dark:text-blue-200 text-xs rounded-lg font-medium shadow-sm">
-                        💬 {result.executionTrace.length} turnos
-                      </span>
-                      {result.databaseActivity && (
-                        <span className="px-2.5 py-1 bg-gradient-to-r from-purple-100 to-pink-100 dark:from-purple-900 dark:to-pink-900 text-purple-700 dark:text-purple-200 text-xs rounded-lg font-medium shadow-sm">
-                          🗄️ {result.databaseActivity.changes?.length || 0} cambios BD
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Flecha - Animada */}
-                <div className={`transform transition-transform duration-300 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}>
-                  <svg className="w-6 h-6 sm:w-8 sm:h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </div>
-              </button>
-
-              {/* Contenido Expandido - Mejorado */}
-              <div className={`border-t-2 border-gray-200 dark:border-gray-700 bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900 transition-all duration-500 ease-in-out overflow-hidden ${
-                isExpanded ? 'max-h-[5000px] opacity-100 p-5 sm:p-6' : 'max-h-0 opacity-0 p-0'
-              }`}>
-                  {/* Resumen Completo - Rediseñado */}
-                  <div className="mb-6">
-                    <h4 className="font-bold text-lg sm:text-xl mb-3 text-gray-900 dark:text-white flex items-center gap-2">
-                      <span className="text-2xl">📝</span>
-                      <span>Resumen Completo</span>
-                    </h4>
-                    <div className="bg-white dark:bg-gray-800 p-4 sm:p-5 rounded-xl shadow-md border border-gray-200 dark:border-gray-700 whitespace-pre-wrap text-sm sm:text-base text-gray-700 dark:text-gray-300 leading-relaxed">
-                      {result.analysis.summary}
-                    </div>
-                  </div>
+            </div>
+          )}
+          
+          {/* OBJECTIVES TAB - Cumplimiento de Objetivos */}
+          {activeTab === 'objectives' && (
 
                   {/* 🎯 NUEVO: Verificación Administrativa - Lenguaje Claro */}
                   {result.databaseActivity && (result.databaseActivity.changes?.length > 0 || result.databaseActivity.discrepancies?.length > 0) && (
@@ -1219,32 +1098,185 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
           );
         })}
       </div>
-            )}
-            
-            {/* AI REPORT TAB */}
-            {activeTab === 'ai-report' && (
-              <div className="space-y-4">
-                <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-2xl p-6 border-2 border-blue-300 dark:border-blue-700">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-2xl font-bold text-blue-800 dark:text-blue-200 flex items-center gap-2">
-                      <span className="text-3xl">🤖</span>
-                      Resumen para IA
-                    </h3>
-                    <button
-                      onClick={() => {
-                        const report = `# AUDIT REPORT\n\nOverall Score: ${stats.avgScore.toFixed(1)}/10\nConversations: ${results.length}\nPassed: ${stats.passed} (${((stats.passed/results.length)*100).toFixed(0)}%)\nFailed: ${stats.failed}\nPrice Errors: ${stats.totalDbErrors}\nDB Operations: ${stats.totalDbOperations}`;
-                        navigator.clipboard.writeText(report);
-                        alert('Reporte copiado al portapapeles');
-                      }}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
-                    >
-                      <span>📋</span>
-                      Copiar
-                    </button>
-                  </div>
+            </div>
+          )}
+          
+          {/* OBJECTIVES TAB - Cumplimiento de Objetivos */}
+          {activeTab === 'objectives' && (
+            <div className="space-y-4">
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <span className="text-3xl">🎯</span>
+                Cumplimiento de Objetivos
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {results.map((result) => {
+                  const score = result.analysis?.overallScore || 0;
+                  const achieved = score >= 7;
+                  return (
+                    <div key={result.id} className={`rounded-xl p-6 border-2 ${achieved ? 'bg-green-50 dark:bg-green-900/20 border-green-400' : 'bg-red-50 dark:bg-red-900/20 border-red-400'}`}>
+                      <div className="flex items-start gap-3 mb-3">
+                        <span className="text-4xl">{achieved ? '✅' : '❌'}</span>
+                        <div className="flex-1">
+                          <h4 className="font-bold text-lg text-gray-900 dark:text-white">{result.testCase.title}</h4>
+                          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{result.testCase.conversationGoal}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-300 dark:border-gray-600">
+                        <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Score:</span>
+                        <span className={`text-2xl font-bold ${score >= 8 ? 'text-green-600' : score >= 5 ? 'text-yellow-600' : 'text-red-600'}`}>{score.toFixed(1)}/10</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          
+          {/* PRICES TAB - Errores de Precios */}
+          {activeTab === 'prices' && (
+            <div className="space-y-4">
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <span className="text-3xl">💰</span>
+                Análisis de Precios vs Base de Datos
+              </h3>
+              {stats.totalDbErrors === 0 ? (
+                <div className="bg-green-50 dark:bg-green-900/20 rounded-2xl p-12 text-center border-2 border-green-400">
+                  <div className="text-8xl mb-4">✅</div>
+                  <h4 className="text-2xl font-bold text-green-800 dark:text-green-200 mb-2">¡Todos los Precios Correctos!</h4>
+                  <p className="text-green-700 dark:text-green-300">No se detectaron errores de precio en ninguna conversación</p>
                 </div>
-                <div className="bg-gray-900 rounded-2xl p-6 font-mono text-sm text-green-400">
-                  <pre className="whitespace-pre-wrap">
+              ) : (
+                <div className="space-y-4">
+                  {results.map((result) => {
+                    const priceErrors = result.databaseActivity?.discrepancies?.filter(d => d.type === 'incorrect_data') || [];
+                    if (priceErrors.length === 0) return null;
+                    
+                    return (
+                      <div key={result.id} className="bg-white dark:bg-gray-800 rounded-xl p-6 border-2 border-red-300 dark:border-red-700">
+                        <h4 className="font-bold text-lg text-red-800 dark:text-red-200 mb-4">{result.testCase.title}</h4>
+                        <div className="space-y-3">
+                          {priceErrors.map((error, idx) => (
+                            <div key={idx} className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4">
+                              <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">{error.description}</p>
+                              <div className="grid grid-cols-2 gap-4 mt-2">
+                                <div>
+                                  <p className="text-xs text-red-600 dark:text-red-400 font-semibold">Bot Ofreció:</p>
+                                  <p className="text-xl font-bold text-red-700 dark:text-red-300">${error.expected}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-green-600 dark:text-green-400 font-semibold">Precio Real:</p>
+                                  <p className="text-xl font-bold text-green-700 dark:text-green-300">${error.actual}</p>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* DATABASE TAB - Actividad de Base de Datos */}
+          {activeTab === 'database' && (
+            <div className="space-y-4">
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <span className="text-3xl">🗄️</span>
+                Actividad de Base de Datos
+              </h3>
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-6 text-center border-2 border-blue-300">
+                  <p className="text-4xl font-bold text-blue-600">{stats.totalDbOperations}</p>
+                  <p className="text-sm text-blue-700 dark:text-blue-300 font-semibold mt-2">Operaciones Totales</p>
+                </div>
+                <div className="bg-purple-50 dark:bg-purple-900/20 rounded-xl p-6 text-center border-2 border-purple-300">
+                  <p className="text-4xl font-bold text-purple-600">{stats.totalDbChanges}</p>
+                  <p className="text-sm text-purple-700 dark:text-purple-300 font-semibold mt-2">Cambios Registrados</p>
+                </div>
+                <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-6 text-center border-2 border-red-300">
+                  <p className="text-4xl font-bold text-red-600">{stats.totalDbErrors}</p>
+                  <p className="text-sm text-red-700 dark:text-red-300 font-semibold mt-2">Errores Críticos</p>
+                </div>
+              </div>
+              {/* Placeholder for detailed database activity */}
+              <div className="bg-gray-50 dark:bg-gray-700/30 rounded-xl p-6">
+                <p className="text-gray-600 dark:text-gray-400">Detalles de actividad de base de datos por conversación disponibles en la pestaña de Conversaciones</p>
+              </div>
+            </div>
+          )}
+          
+          {/* CONVERSATIONS TAB - Detalle de Cada Conversación */}
+          {activeTab === 'conversations' && (
+            <div className="space-y-4">
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <span className="text-3xl">💬</span>
+                Detalle de Conversaciones
+              </h3>
+              {results.map((result) => {
+                const isExpanded = expandedCards.has(result.id);
+                const cardColors = getScoreColor(result.analysis.overallScore);
+                
+                return (
+                  <div key={result.id} className={`bg-white dark:bg-gray-800 rounded-2xl border-2 ${cardColors.border} overflow-hidden`}>
+                    <button
+                      onClick={() => toggleCard(result.id)}
+                      className="w-full p-5 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-750"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className={`w-16 h-16 rounded-xl ${cardColors.bg} flex flex-col items-center justify-center border-2 ${cardColors.border}`}>
+                          <div className="text-2xl">{getScoreEmoji(result.analysis.overallScore)}</div>
+                          <div className="text-sm font-bold">{result.analysis.overallScore.toFixed(1)}</div>
+                        </div>
+                        <div className="text-left">
+                          <h4 className="font-bold text-lg text-gray-900 dark:text-white">{result.testCase.title}</h4>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">{result.executionTrace.length} turnos</p>
+                        </div>
+                      </div>
+                      <div className={`transform transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
+                        <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </button>
+                    {isExpanded && (
+                      <div className="border-t-2 border-gray-200 dark:border-gray-700 p-5 bg-gray-50 dark:bg-gray-900">
+                        <div className="bg-white dark:bg-gray-800 p-4 rounded-lg">
+                          <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{result.analysis.summary}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          
+          {/* AI REPORT TAB */}
+          {activeTab === 'ai-report' && (
+            <div className="space-y-4">
+              <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-2xl p-6 border-2 border-blue-300 dark:border-blue-700">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-2xl font-bold text-blue-800 dark:text-blue-200 flex items-center gap-2">
+                    <span className="text-3xl">🤖</span>
+                    Resumen para IA
+                  </h3>
+                  <button
+                    onClick={() => {
+                      const report = `# AUDIT REPORT\\n\\nOverall Score: ${stats.avgScore.toFixed(1)}/10\\nConversations: ${results.length}\\nPassed: ${stats.passed} (${((stats.passed/results.length)*100).toFixed(0)}%)\\nFailed: ${stats.failed}\\nPrice Errors: ${stats.totalDbErrors}\\nDB Operations: ${stats.totalDbOperations}`;
+                      navigator.clipboard.writeText(report);
+                      alert('Reporte copiado al portapapeles');
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
+                  >
+                    <span>📋</span>
+                    Copiar
+                  </button>
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded-2xl p-6 font-mono text-sm text-green-400">
+                <pre className="whitespace-pre-wrap">
 {`# AUDIT REPORT - CONSOLIDATED ANALYSIS
 
 ## OVERALL METRICS
@@ -1267,14 +1299,14 @@ ${stats.totalDbErrors === 0 ? '✅ All prices correct' : `⚠️ ${stats.totalDb
 
 ## RECOMMENDATIONS
 ${stats.avgScore >= 8 ? '✅ System performing excellently' : stats.avgScore >= 6 ? '⚠️ System needs improvements' : '❌ Critical issues detected - immediate action required'}`}
-                  </pre>
-                </div>
+                </pre>
               </div>
-            )}
-            
-          </div>
+            </div>
+          )}
+          
         </div>
       </div>
+    </div>
   );
 };
 

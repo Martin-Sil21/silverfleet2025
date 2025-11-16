@@ -273,6 +273,52 @@ export interface ParsedCodeProject {
   // 🆕 Para detección adaptativa
   agentDetectionType?: AgentDetectionType;
   implicitAgentAnalysis?: ImplicitAgentAnalysis;
+  
+  // 🔥 NUEVO: Análisis profundo de código (hooks, queries, flujo de datos)
+  deepAnalysis?: {
+    hooks: Array<{
+      name: string;
+      filePath: string;
+      queries: Array<{
+        table: string | null;
+        queryType: 'select' | 'insert' | 'update' | 'delete' | 'unknown';
+        fields: string[];
+      }>;
+      usedBy: string[];
+      semanticPurpose?: string;
+    }>;
+    databaseQueries: Array<{
+      functionName: string;
+      filePath: string;
+      table: string | null;
+      queryType: 'select' | 'insert' | 'update' | 'delete' | 'unknown';
+      fields: string[];
+      semanticContext?: string;
+    }>;
+    operations: Array<{
+      agentName: string;
+      operation: 'read' | 'write' | 'delete';
+      table: string;
+      fields: string[];
+      hookOrFunction: string;
+      semanticContext: string;
+    }>;
+    dataFlow: Array<{
+      from: string; // Agent name
+      through: string; // Hook/function name
+      to: string; // Table name
+      fields: string[];
+      purpose: string;
+    }>;
+    tables: Array<{
+      name: string;
+      operations: Array<{
+        type: 'read' | 'write' | 'delete';
+        usedBy: string[];
+        fields: string[];
+      }>;
+    }>;
+  };
 }
 
 export interface CodeProjectAuditConfig extends AuditConfig {

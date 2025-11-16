@@ -148,17 +148,52 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 );
 
 
+// 🔥 Tab system for detailed view
+type ReportTabType = 'summary' | 'database' | 'verification' | 'conversation';
+
+const ReportTabButton: React.FC<{ 
+  active: boolean; 
+  icon: string; 
+  label: string; 
+  count?: number;
+  onClick: () => void 
+}> = ({ active, icon, label, count, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-2 px-4 py-2 font-semibold text-sm rounded-t-lg transition-all ${
+      active 
+        ? 'bg-white dark:bg-gray-800 text-primary-600 dark:text-primary-400 border-t-2 border-x-2 border-primary-500' 
+        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600'
+    }`}
+  >
+    <span className="text-lg">{icon}</span>
+    <span>{label}</span>
+    {count !== undefined && count > 0 && (
+      <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-bold ${
+        active ? 'bg-primary-500 text-white' : 'bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300'
+      }`}>
+        {count}
+      </span>
+    )}
+  </button>
+);
+
 const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ result, config }) => {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [isTraceVisible, setIsTraceVisible] = useState(false);
+  const [activeTab, setActiveTab] = useState<ReportTabType>('summary');
   const { t, language } = useTranslation();
-  const traceTitle = config.auditType === 'real' ? t('showConversationLog') : t('showNodeLog');
-  const hideTraceTitle = config.auditType === 'real' ? t('hideConversationLog') : t('hideNodeLog');
+  
   function getScoreColor(score: number): string {
     if (score >= 8) return 'text-green-600 dark:text-green-400';
     if (score >= 5) return 'text-yellow-600 dark:text-yellow-400';
     return 'text-red-600 dark:text-red-400';
   }
+  
+  // Contadores para badges
+  const dbChangesCount = result.databaseActivity?.changes?.length || 0;
+  const dbDiscrepanciesCount = result.databaseActivity?.discrepancies?.length || 0;
+  const hasDB = result.databaseActivity && result.databaseActivity.totalOperations > 0;
+  const hasVerification = (result.databaseActivity as any)?.intelligentVerification;
 
   return (
     <Card className="mb-6">
@@ -198,12 +233,48 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
         </div>
       </div>
       {isExpanded && (
-        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 animate-fade-in space-y-6">
+        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 animate-fade-in">
+          {/* 🔥 Tabs */}
+          <div className="flex gap-2 mb-4 border-b-2 border-gray-300 dark:border-gray-600">
+            <ReportTabButton 
+              active={activeTab === 'summary'} 
+              icon="📊" 
+              label="Resumen"
+              onClick={() => setActiveTab('summary')}
+            />
+            {hasDB && (
+              <ReportTabButton 
+                active={activeTab === 'database'} 
+                icon="🗄️" 
+                label="Base de Datos"
+                count={dbChangesCount + dbDiscrepanciesCount}
+                onClick={() => setActiveTab('database')}
+              />
+            )}
+            {hasVerification && (
+              <ReportTabButton 
+                active={activeTab === 'verification'} 
+                icon="🔧" 
+                label="Verificación"
+                onClick={() => setActiveTab('verification')}
+              />
+            )}
+            <ReportTabButton 
+              active={activeTab === 'conversation'} 
+              icon="💬" 
+              label="Conversación"
+              count={result.executionTrace.length}
+              onClick={() => setActiveTab('conversation')}
+            />
+          </div>
           
-          {/* ============================================ */}
-          {/* 📊 SECCIÓN 1: RESUMEN GENERAL */}
-          {/* ============================================ */}
-          <section className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-5 border-2 border-blue-300 dark:border-blue-700">
+          {/* Tab Content */}
+          <div className="space-y-6">
+            {/* ============================================ */}
+            {/* 📊 TAB: RESUMEN GENERAL */}
+            {/* ============================================ */}
+            {activeTab === 'summary' && (
+              <section className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-5 border-2 border-blue-300 dark:border-blue-700">
             <div className="flex items-center gap-3 mb-4">
               <span className="text-3xl">📊</span>
               <h3 className="text-2xl font-bold text-blue-900 dark:text-blue-100">
@@ -282,11 +353,12 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
               <CriterionBreakdown analysis={result.analysis.criteriaBreakdown} />
             </div>
           </section>
-
+            )}
+          
           {/* ============================================ */}
-          {/* 🗄️ SECCIÓN 2: BASE DE DATOS */}
+          {/* 🗄️ TAB: BASE DE DATOS */}
           {/* ============================================ */}
-          {result.databaseActivity && (
+          {activeTab === 'database' && result.databaseActivity && (
             <section className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-5 border-2 border-purple-300 dark:border-purple-700">
               <div className="flex items-center gap-3 mb-4">
                 <span className="text-3xl">🗄️</span>
@@ -969,10 +1041,30 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
             </section>
           )}
 
+            </>
+          )}
+          
           {/* ============================================ */}
-          {/* 📈 SECCIÓN 4: MÉTRICAS Y ESTADÍSTICAS */}
+          {/* 💬 TAB: CONVERSACIÓN */}
           {/* ============================================ */}
-          <section className="bg-gradient-to-r from-green-50 to-teal-50 dark:from-green-900/20 dark:to-teal-900/20 rounded-xl p-5 border-2 border-green-300 dark:border-green-700">
+          {activeTab === 'conversation' && (
+            <section className="bg-gradient-to-r from-green-50 to-teal-50 dark:from-green-900/20 dark:to-teal-900/20 rounded-xl p-5 border-2 border-green-300 dark:border-green-700">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-3xl">💬</span>
+                <h3 className="text-2xl font-bold text-green-900 dark:text-green-100">
+                  Conversación Completa
+                </h3>
+              </div>
+              
+              {/* Vista de conversación */}
+              {config.auditType === 'real' ? (
+                <ConversationTraceViewer trace={result.executionTrace} />
+              ) : (
+                <NodeTraceViewer trace={result.executionTrace} config={config} />
+              )}
+              
+              {/* Métricas adicionales */}
+              <div className="mt-6">
             <div className="flex items-center gap-3 mb-4">
               <span className="text-3xl">📈</span>
               <h3 className="text-2xl font-bold text-green-900 dark:text-green-100">
@@ -1144,20 +1236,8 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
               </div>
             </div>
           </section>
-
-          <div className="flex items-center gap-4 mt-4">
-            <button
-              onClick={(e) => { e.stopPropagation(); setIsTraceVisible(!isTraceVisible); }}
-              className="text-sm font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-200"
-            >
-              {isTraceVisible ? hideTraceTitle : traceTitle}
-            </button>
-          </div>
-          {isTraceVisible && (
-            config.auditType === 'real' 
-              ? <ConversationTraceViewer trace={result.executionTrace} />
-              : <NodeTraceViewer trace={result.executionTrace} config={config} />
           )}
+          </div>
         </div>
       )}
     </Card>
