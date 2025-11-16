@@ -11,6 +11,7 @@
 import React, { useState } from 'react';
 import type { AuditResult, AuditConfig } from '../types';
 import { generatePriceComparison } from '../services/priceExtractor';
+import { analyzeDBSemantically, type TableSemanticInfo } from '../services/databaseSemanticAnalyzer';
 
 interface ModernAuditReportProps {
   results: AuditResult[];
@@ -140,7 +141,91 @@ const ModernAuditReport: React.FC<ModernAuditReportProps> = ({ results, config, 
                           <span>Cambios en Base de Datos</span>
                         </h3>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {/* 🧠 Análisis Semántico */}
+                        {(() => {
+                          const conversationMessages = result.executionTrace.map(step => ({
+                            user: step.input?.message || step.input?.body,
+                            bot: step.output?.response || step.output?.message
+                          }));
+                          
+                          const semanticAnalysis = analyzeDBSemantically(
+                            changes,
+                            result.testCase.conversationGoal,
+                            conversationMessages
+                          );
+
+                          return (
+                            <div className="mb-6 space-y-3">
+                              {semanticAnalysis.map((tableInfo, idx) => (
+                                <div key={idx} className={`rounded-xl p-4 border-2 ${
+                                  tableInfo.analysis.concerns.length > 0
+                                    ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-400 dark:border-yellow-700'
+                                    : 'bg-green-50 dark:bg-green-900/20 border-green-400 dark:border-green-700'
+                                }`}>
+                                  <div className="flex items-start gap-3">
+                                    <div className="text-3xl">
+                                      {tableInfo.analysis.understood ? '🧠' : '📊'}
+                                    </div>
+                                    <div className="flex-1">
+                                      <div className="text-xs font-mono text-gray-600 dark:text-gray-400 mb-1">
+                                        {tableInfo.purpose}
+                                      </div>
+                                      <div className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+                                        {tableInfo.table}
+                                      </div>
+                                      <div className="text-sm text-gray-700 dark:text-gray-300 mb-3">
+                                        {tableInfo.analysis.summary}
+                                      </div>
+
+                                      {/* Fortalezas */}
+                                      {tableInfo.analysis.strengths.length > 0 && (
+                                        <div className="space-y-1 mb-2">
+                                          {tableInfo.analysis.strengths.map((s, i) => (
+                                            <div key={i} className="text-xs text-green-700 dark:text-green-300 flex items-start gap-1">
+                                              <span>✅</span>
+                                              <span>{s}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+
+                                      {/* Problemas */}
+                                      {tableInfo.analysis.concerns.length > 0 && (
+                                        <div className="space-y-1 mb-2">
+                                          {tableInfo.analysis.concerns.map((c, i) => (
+                                            <div key={i} className="text-xs text-yellow-700 dark:text-yellow-300 flex items-start gap-1">
+                                              <span>⚠️</span>
+                                              <span>{c}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+
+                                      {/* Faltantes */}
+                                      {tableInfo.analysis.missing.length > 0 && (
+                                        <div className="space-y-1">
+                                          {tableInfo.analysis.missing.map((m, i) => (
+                                            <div key={i} className="text-xs text-red-700 dark:text-red-300 flex items-start gap-1">
+                                              <span>❌</span>
+                                              <span>{m}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Operaciones técnicas (colapsable) */}
+                        <details className="mb-4">
+                          <summary className="cursor-pointer text-sm font-bold text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200">
+                            📋 Ver operaciones técnicas
+                          </summary>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
                           {(() => {
                             const byTable = new Map<string, any[]>();
                             changes.forEach(c => {
@@ -204,6 +289,7 @@ const ModernAuditReport: React.FC<ModernAuditReportProps> = ({ results, config, 
                             });
                           })()}
                         </div>
+                        </details>
                       </div>
                     )}
 

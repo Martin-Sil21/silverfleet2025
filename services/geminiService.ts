@@ -735,12 +735,49 @@ const analyzeResult = async (
        - Technical success WITHOUT helping user = LOW score (≤5)
        - User blocked without valid reason = CRITICAL
     
-    SCORING RULES:
-    - 9-10: Exceptional - Goal achieved, no issues, exceeded expectations
-    - 7-8: Good - Goal achieved with minor issues
-    - 5-6: Acceptable - Goal partially achieved or achieved with significant issues
-    - 3-4: Poor - Goal not achieved, multiple problems
-    - 1-2: Critical failure - Security issues, data corruption, complete failure
+    SCORING RULES - BE RATIONAL AND PROPORTIONAL:
+    
+    🎯 OVERALL SCORE CALCULATION:
+    Start at 10/10 and subtract points ONLY for actual problems, weighted by impact:
+    
+    CRITICAL PROBLEMS (−3 to −4 points each):
+    - Wrong prices sent to customer (pricing errors)
+    - Wrong recipient/phone number (data accuracy errors)
+    - Promised action NOT executed (e.g., "I sent email" but didn't)
+    - Data corruption or security breaches
+    - Complete failure to achieve goal
+    
+    SIGNIFICANT PROBLEMS (−1.5 to −2.5 points each):
+    - Tool not working as expected (but user still got help)
+    - Multiple data inconsistencies
+    - Goal achieved but with workarounds or extra user effort
+    
+    MINOR PROBLEMS (−0.3 to −0.7 points each):
+    - Hardcoded data from payload (e.g., name, phone) instead of asking - THIS IS VERY MINOR
+    - Suboptimal conversation flow (but still functional)
+    - Missing optional validations
+    - Cosmetic issues (formatting, typos)
+    
+    NON-PROBLEMS (0 points):
+    - Using payload data that was provided in the initial context (expected behavior)
+    - Storing session info in database (normal operation)
+    - Not asking for info that was already provided
+    
+    FINAL SCORE RANGES:
+    - 9.0-10.0: Exceptional - Goal achieved, no real issues
+    - 7.5-8.9: Good - Goal achieved, minor issues only
+    - 6.0-7.4: Acceptable - Goal achieved with some problems or partially achieved
+    - 4.0-5.9: Poor - Goal not achieved, multiple problems
+    - 0.0-3.9: Critical failure - Security issues, data corruption, complete failure
+    
+    🧠 EXAMPLE SCORING:
+    Scenario: Bot used customer name from payload instead of asking
+    Impact: Conversation worked fine, customer got help
+    Score reduction: −0.5 (minor) → Final score: 9.5/10
+    
+    Scenario: Bot said "I sent email" but didn't actually send it
+    Impact: Customer expects confirmation, didn't get it
+    Score reduction: −3.5 (critical promise not kept) → Final score: 6.5/10
 
     Execution Trace:
     ${traceSummary}
