@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { AuditStatus, type AuditConfig, type AuditResult, type ImprovementData, type ParsedN8nWorkflow, type TestCase, type ExecutionStep, HistoricalAudit, type ParsedCodeProject } from './types';
 import ProjectTypeSelector from './components/ProjectTypeSelector';
 import AuditReport from './components/AuditReport';
-import ProfessionalAuditReport from './components/ProfessionalAuditReport';
+import ModernAuditReport from './components/ModernAuditReport';
 import { generateTestCases, runFullAudit } from './services/geminiService';
 import { ShieldCheckIcon } from './components/icons/ShieldCheckIcon';
 import ImprovementReport from './components/ImprovementReport';
@@ -323,7 +323,7 @@ const App: React.FC = () => {
         />;
       case AuditStatus.REPORT_READY:
         if (!auditConfig) return null; // Should not happen
-        return <ProfessionalAuditReport results={auditResults} config={auditConfig} onReset={handleReset} />;
+        return <ModernAuditReport results={auditResults} config={auditConfig} onReset={handleReset} />;
       case AuditStatus.IMPROVEMENT_REPORT_READY:
         if (!improvementData || !auditResults.length || !auditConfig) {
             return (
