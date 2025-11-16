@@ -81,6 +81,7 @@ class RealDatabaseAuditor {
   public detectedTools: DetectedTool[] = [];
   public detectedSubflows: DetectedSubflow[] = [];
   public toolVerifications: ToolVerificationResult[] = []; // Público para reporting
+  private hookMappings: any[] = []; // 🔥 NUEVO: Custom hooks para queries inteligentes
   
   // 🔥 Accessor para dependencias (tools + subflows)
   public get dependencies() {
@@ -96,7 +97,8 @@ class RealDatabaseAuditor {
     payload?: Record<string, any>, 
     workflowNodes?: any[],
     detectedTools?: DetectedTool[],
-    detectedSubflows?: DetectedSubflow[]
+    detectedSubflows?: DetectedSubflow[],
+    hookMappings?: any[] // 🔥 NUEVO: Mappings de custom hooks
   ) {
     // ========== VALIDACIÓN ROBUSTA ==========
     console.log(`\n🔍 [DB Auditor] Validando configuración...`);
@@ -160,6 +162,9 @@ class RealDatabaseAuditor {
     this.payload = payload;
     this.detectedTools = detectedTools || [];
     this.detectedSubflows = detectedSubflows || [];
+    this.hookMappings = hookMappings || []; // 🔥 NUEVO
+    
+    console.log(`   🔗 Custom hooks disponibles: ${this.hookMappings.length}`);
     
     // 🔥 DEBUG: Ver qué nos llega
     console.log(`\n🔥 [Constructor RealDatabaseAuditor]`);
@@ -500,8 +505,47 @@ class RealDatabaseAuditor {
     switch (this.config.type) {
       case 'supabase':
         try {
-          // 🔥 ESTRATEGIA 1: Usar información del WORKFLOW (si está disponible)
           console.log(`\n   🔍 [${table}] Iniciando consulta...`);
+          
+          // 🔥 ESTRATEGIA 0: Usar CUSTOM HOOK MAPPING (PRIORIDAD MÁXIMA)
+          if (this.hookMappings.length > 0 && this.payload) {
+            const hookMapping = this.hookMappings.find((m: any) => m.table === table);
+            
+            if (hookMapping) {
+              console.log(`   🔗 [${table}] USANDO CUSTOM HOOK MAPPING`);
+              console.log(`      Hook: ${hookMapping.hookName}`);
+              console.log(`      Estrategia: ${hookMapping.filterStrategy}`);
+              
+              try {
+                let query = this.client.from(table).select('*');
+                
+                // Aplicar filtro basado en el mapping
+                if (hookMapping.filterField && hookMapping.sourceField) {
+                  const filterValue = this.payload[hookMapping.sourceField];
+                  if (filterValue) {
+                    query = query.eq(hookMapping.filterField, filterValue);
+                    console.log(`      🎯 Filtrando ${hookMapping.filterField} = "${filterValue}"`);
+                  }
+                }
+                
+                const { data, error } = await query
+                  .order('created_at', { ascending: false, nullsFirst: false })
+                  .limit(150);
+                
+                if (!error && data) {
+                  console.log(`      ✅ ${data.length} registros usando hook mapping`);
+                  return data;
+                }
+                
+                console.log(`      ⚠️ Hook mapping falló:`, error?.message);
+              } catch (err) {
+                console.log(`      ⚠️ Error con hook:`, err);
+              }
+            }
+          }
+          
+          // 🔥 ESTRATEGIA 1: Usar información del WORKFLOW (si está disponible)
+          console.log(`   🔍 [${table}] Usando detección de workflow...`);
           console.log(`      workflowInfo existe: ${!!this.workflowInfo}`);
           console.log(`      payload existe: ${!!this.payload}`);
           
@@ -1237,7 +1281,8 @@ export const initializeRealDatabaseAuditor = (
   payload?: Record<string, any>,
   workflowNodes?: any[], // 🔥 Nodos del workflow para análisis inteligente
   detectedTools?: DetectedTool[],
-  detectedSubflows?: DetectedSubflow[]
+  detectedSubflows?: DetectedSubflow[],
+  hookMappings?: any[] // 🔥 NUEVO: Mappings de custom hooks
 ): RealDatabaseAuditor => {
   console.log(`\n🗄️ ===== INICIALIZANDO AUDITOR DE BD =====`);
   console.log(`   Conversación: ${conversationId}`);
@@ -1248,6 +1293,7 @@ export const initializeRealDatabaseAuditor = (
   console.log(`   Nodos del workflow: ${workflowNodes ? workflowNodes.length : 'no proporcionados'}`);
   console.log(`   Herramientas detectadas: ${detectedTools?.length || 0}`);
   console.log(`   Subflows detectados: ${detectedSubflows?.length || 0}`);
+  console.log(`   Custom hooks: ${hookMappings?.length || 0}`); // 🔥 NUEVO
   
   const auditor = new RealDatabaseAuditor(
     conversationId, 
@@ -1255,7 +1301,8 @@ export const initializeRealDatabaseAuditor = (
     payload, 
     workflowNodes, 
     detectedTools, 
-    detectedSubflows
+    detectedSubflows,
+    hookMappings // 🔥 NUEVO
   );
   auditorRegistry.set(conversationId, auditor);
   

@@ -158,6 +158,27 @@ function isDatabaseWrapper(body: string, name: string): boolean {
 }
 
 /**
+ * 🔥 NUEVO: Extrae nombre de tabla directamente del código .from('tabla')
+ */
+function extractTableFromCode(body: string): string | undefined {
+  // Buscar .from('table_name') o .from("table_name") o .from(`table_name`)
+  const fromPatterns = [
+    /\.from\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/,
+    /this\.supabase\.from\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/,
+  ];
+  
+  for (const pattern of fromPatterns) {
+    const match = body.match(pattern);
+    if (match && match[1]) {
+      console.log(`      🎯 Tabla extraída del código: "${match[1]}"`);
+      return match[1];
+    }
+  }
+  
+  return undefined;
+}
+
+/**
  * Analiza un wrapper y extrae su información
  */
 function analyzeWrapper(
@@ -188,8 +209,13 @@ function analyzeWrapper(
     operationCount++;
   }
   
-  // Inferir tabla desde el nombre del método
-  const inferredTable = inferTableFromMethodName(name);
+  // 🔥 PRIORIDAD 1: Extraer tabla directamente del código
+  let detectedTable = extractTableFromCode(body);
+  
+  // 🔥 PRIORIDAD 2: Inferir desde el nombre del método
+  if (!detectedTable) {
+    detectedTable = inferTableFromMethodName(name);
+  }
   
   // Extraer campos mencionados
   const fields = extractFieldsFromBody(body);
@@ -200,6 +226,8 @@ function analyzeWrapper(
   // Snippet de código (primeras 3 líneas del método)
   const snippet = body.split('\n').slice(0, 3).join('\n').trim();
   
+  console.log(`      📦 ${className}.${name} → tabla: ${detectedTable || 'unknown'} (${operation})`);
+  
   return {
     name: className ? `${className}.${name}` : name,
     className,
@@ -207,10 +235,10 @@ function analyzeWrapper(
     lineNumber,
     type,
     operation,
-    inferredTable,
+    inferredTable: detectedTable,
     fields,
     usedByAgents: [], // Se llenará después
-    confidence: inferredTable ? 0.85 : 0.65,
+    confidence: detectedTable ? 0.95 : 0.50,
     codeSnippet: snippet
   };
 }

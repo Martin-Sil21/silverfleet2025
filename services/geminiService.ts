@@ -3,6 +3,7 @@ import type { AuditConfig, TestCase, Analysis, AuditResult, ImprovementData, Wor
 import { runConversationIndependently } from './independentConversationRunner';
 import { costTracker, type CostSummary } from './costTracker';
 import { initializeRealDatabaseAuditor, getRealDatabaseAuditor, cleanupRealDatabaseAuditor } from './realDatabaseAuditor';
+import { extractCustomHooks, generateHookMappings } from './customHookIntegrator';
 import { verifyToolExecutions, generateToolVerificationSummary } from './toolExecutionVerifier';
 import { analyzeWorkflowDependencies } from './workflowDependencyAnalyzer';
 import { verifyConversationIntelligently, generateDiscrepanciesReport, type IntelligentVerificationResult } from './intelligentToolVerificator';
@@ -1029,6 +1030,15 @@ export const runFullAudit = async (
             let successCount = 0;
             let errorCount = 0;
             
+            // 🔗 Extraer custom hooks si es proyecto ZIP
+            let hookMappings: any[] = [];
+            if (isCodeProject && config.codeProject) {
+                console.log('\n🔗 [Custom Hooks] Extracting from code project...');
+                const customHooks = extractCustomHooks(config.codeProject);
+                hookMappings = generateHookMappings(customHooks, config.samplePayload);
+                console.log(`   ✅ Generated ${hookMappings.length} hook mappings for intelligent queries`);
+            }
+            
             testCases.forEach(tc => {
                 try {
                     // 🔥 Usar samplePayload como referencia (tiene la estructura correcta)
@@ -1042,17 +1052,18 @@ export const runFullAudit = async (
                     const workflowForAnalysis = isCodeProject ? undefined : config.workflow;
                     
                     if (isCodeProject) {
-                        console.log(`   📦 [${tc.title}] Proyecto ZIP: Usando solo auto-detección de BD`);
+                        console.log(`   📦 [${tc.title}] Proyecto ZIP: Usando custom hooks detectados (${hookMappings.length})`);
                     }
                     
-                    // 🔥 Pasar herramientas detectadas al auditor
+                    // 🔥 Pasar herramientas detectadas + custom hooks al auditor
                     initializeRealDatabaseAuditor(
                         tc.id, 
                         dbConfig as any, 
                         referencePayload, // Usar payload con estructura correcta
                         workflowForAnalysis, // undefined para ZIP, workflow real para n8n
                         dependencies.tools,
-                        dependencies.subflows
+                        dependencies.subflows,
+                        hookMappings // 🔥 NUEVO: Pasar hook mappings
                     );
                     successCount++;
                     onProgress({ message: `   ✅ Auditor BD para "${tc.title}"` });
