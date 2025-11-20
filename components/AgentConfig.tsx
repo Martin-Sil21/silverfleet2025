@@ -884,7 +884,27 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
           <Card>
             <DetailedDatabaseViewer 
               databases={codeProject.databases}
-              deepAnalysis={codeProject.deepAnalysis}
+              deepAnalysis={codeProject.deepAnalysis ? {
+                hooks: codeProject.deepAnalysis.hooks?.map(hook => ({
+                  name: hook.name,
+                  description: hook.semanticPurpose || `Database hook in ${hook.filePath}`
+                })) || [],
+                databaseQueries: codeProject.deepAnalysis.databaseQueries?.map(query => ({
+                  query: `${query.queryType.toUpperCase()} ${query.table || 'unknown'} (${query.functionName})`,
+                  context: query.semanticContext || `Function: ${query.functionName} in ${query.filePath}`
+                })) || [],
+                operations: codeProject.deepAnalysis.operations?.map(op => ({
+                  type: op.operation,
+                  target: op.agentName,
+                  fields: op.fields || []
+                })) || [],
+                dataFlow: codeProject.deepAnalysis.dataFlow?.map(flow => ({
+                  from: flow.from,
+                  to: flow.to,
+                  operation: flow.purpose || `${flow.from} → ${flow.through} → ${flow.to}`
+                })) || [],
+                tables: codeProject.deepAnalysis.tables || []
+              } : undefined}
             />
           </Card>
 

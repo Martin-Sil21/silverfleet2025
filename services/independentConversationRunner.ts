@@ -14,58 +14,6 @@ const MAX_CONVERSATION_TURNS = 12;
 const WEBHOOK_TIMEOUT_MS = 60000; // 60 segundos por llamada al webhook (algunos agentes son lentos)
 
 /**
- * Calcula similaridad entre dos strings (0 = diferentes, 1 = idénticos)
- */
-function calculateSimilarity(str1: string, str2: string): number {
-    if (!str1 || !str2) return 0;
-    
-    const s1 = str1.toLowerCase().trim();
-    const s2 = str2.toLowerCase().trim();
-    
-    if (s1 === s2) return 1;
-    
-    // Usar Levenshtein simplificado (distancia de edición)
-    const longer = s1.length > s2.length ? s1 : s2;
-    const shorter = s1.length > s2.length ? s2 : s1;
-    
-    if (longer.length === 0) return 1;
-    
-    const editDistance = levenshteinDistance(longer, shorter);
-    return (longer.length - editDistance) / longer.length;
-}
-
-/**
- * Calcula distancia de Levenshtein entre dos strings
- */
-function levenshteinDistance(str1: string, str2: string): number {
-    const matrix: number[][] = [];
-    
-    for (let i = 0; i <= str2.length; i++) {
-        matrix[i] = [i];
-    }
-    
-    for (let j = 0; j <= str1.length; j++) {
-        matrix[0][j] = j;
-    }
-    
-    for (let i = 1; i <= str2.length; i++) {
-        for (let j = 1; j <= str1.length; j++) {
-            if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-            } else {
-                matrix[i][j] = Math.min(
-                    matrix[i - 1][j - 1] + 1,
-                    matrix[i][j - 1] + 1,
-                    matrix[i - 1][j] + 1
-                );
-            }
-        }
-    }
-    
-    return matrix[str2.length][str1.length];
-}
-
-/**
  * Ejecuta una conversación de manera independiente (para ejecución paralela)
  * 
  * @param conv - Estado de la conversación (testCase, history, etc.)
@@ -190,29 +138,7 @@ export async function runConversationIndependently(
                 }
             });
             
-            // ========== 5. DETECTAR LOOP INFINITO ==========
-            // 🔥 Si el mensaje es MUY similar al anterior, es un loop
-            if (turnNumber > 1 && conv.history.length > 0) {
-                const lastUserMessage = findUserMessageText(conv.history[conv.history.length - 1].input);
-                const similarity = calculateSimilarity(userMessage, lastUserMessage);
-                
-                if (similarity > 0.8) { // 80% similar = probablemente un loop
-                    console.error(`   🔁 LOOP DETECTADO: Mensaje muy similar al anterior (${(similarity * 100).toFixed(0)}% similar)`);
-                    console.error(`      Anterior: "${lastUserMessage}"`);
-                    console.error(`      Actual: "${userMessage}"`);
-                    
-                    onProgress({
-                        message: `⚠️ [${conv.testCase.title}] Loop detectado - Finalizando`,
-                        testCaseId: conv.testCase.id
-                    });
-                    
-                    conv.isComplete = true;
-                    conv.finalStatus = 'ERROR';
-                    break;
-                }
-            }
-            
-            // ========== 6. VERIFICAR BLOQUEO ANTES DE ENVIAR ==========
+            // ========== 5. VERIFICAR BLOQUEO ANTES DE ENVIAR ==========
             // 🔥 NUEVO: Verificar si el usuario está bloqueado en BD ANTES del timeout
             const dbAuditor = getRealDatabaseAuditor(conv.testCase.id);
             if (dbAuditor && turnNumber > 1) { // Solo después del primer turno
@@ -243,10 +169,9 @@ export async function runConversationIndependently(
                 }
             }
             
-            // ========== 7. ENVIAR AL WEBHOOK CON TIMEOUT ==========
+            // ========== 6. ENVIAR AL WEBHOOK CON TIMEOUT ==========
             let agentResponse: any;
             let webhookError = false;
-            let webhookStartTime = Date.now();
             
             try {
                 const controller = new AbortController();
@@ -285,63 +210,17 @@ export async function runConversationIndependently(
                         throw new Error('Conversación cancelada por el usuario');
                     } else {
                         console.error(`   ⏱️ TIMEOUT: Webhook no respondió en ${WEBHOOK_TIMEOUT_MS}ms`);
-                        
-                        // 🔥 CRÍTICO: Si es timeout, NO continuar la conversación
-                        onProgress({
-                            message: `⏱️ [${conv.testCase.title}] Timeout del bot - Finalizando`,
-                            testCaseId: conv.testCase.id
-                        });
-                        
-                        conv.isComplete = true;
-                        conv.finalStatus = 'ERROR';
-                        
-                        // Agregar step de error
-                        conv.history.push({
-                            nodeId: `Turn ${turnNumber}`,
-                            status: 'ERROR',
-                            input: { message: userMessage },
-                            output: { error: 'Webhook timeout', message: 'El bot no respondió a tiempo' },
-                            log: `Timeout después de ${WEBHOOK_TIMEOUT_MS}ms`,
-                            durationMs: Date.now() - webhookStartTime,
-                            timestamp: webhookStartTime
-                        });
-                        
-                        break; // 🔥 SALIR DEL LOOP
+                        agentResponse = { 
+                            error: 'Webhook timeout',
+                            message: 'El agente no respondió a tiempo'
+                        };
                     }
                 } else {
                     console.error(`   ❌ Error llamando al webhook:`, webhookErr);
-                    
-                    // 🔥 Si hay error, guardar y terminar
                     agentResponse = { 
                         error: webhookErr.message || 'Unknown error',
                         message: 'Error conectando con el agente'
                     };
-                    
-                    // 🔥 Si es el 2do error consecutivo, TERMINAR
-                    const lastTurnWasError = conv.history.length > 0 && conv.history[conv.history.length - 1].status === 'ERROR';
-                    if (lastTurnWasError) {
-                        console.error(`   🛑 SEGUNDO ERROR CONSECUTIVO - TERMINANDO CONVERSACIÓN`);
-                        
-                        onProgress({
-                            message: `❌ [${conv.testCase.title}] Errores consecutivos - Finalizando`,
-                            testCaseId: conv.testCase.id
-                        });
-                        
-                        conv.isComplete = true;
-                        conv.finalStatus = 'ERROR';
-                        
-                        conv.history.push({
-                            nodeId: `Turn ${turnNumber}`,
-                            status: 'ERROR',
-                            input: { message: userMessage },
-                            output: agentResponse,
-                            log: `Error: ${webhookErr.message}`,
-                            durationMs: Date.now() - webhookStartTime,
-                            timestamp: webhookStartTime
-                        });
-                        
-                        break; // 🔥 SALIR DEL LOOP
-                    }
                 }
             }
             
