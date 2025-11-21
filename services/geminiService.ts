@@ -10,6 +10,7 @@ import { verifyConversationIntelligently, generateDiscrepanciesReport, type Inte
 import { IntegrationManager, createIntegrationManager, type IntegrationConfig } from './IntegrationManager';
 import { promiseAllWithTimeout, promiseWithTimeout } from './apiUtils';
 import snapshotCache from './snapshotCache';
+import { getNextApiKey, markKeyAsFailed, withApiKeyRetry } from './apiKeyRotator';
 
 // Exportar función para obtener el resumen de costos desde otros componentes
 export const getCostSummary = (): CostSummary => costTracker.getSummary();
@@ -557,9 +558,11 @@ const analyzeResult = async (
     databaseActivity?: ReturnType<typeof getRealDatabaseAuditor> extends { getSummary(): infer T } ? T : never,
     intelligentVerification?: IntelligentVerificationResult
 ): Promise<Analysis> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const { criteria, workflow, connections } = config;
-    const { testCase, executionTrace, finalStatus } = result;
+    // Usar rotación de API keys con retry automático
+    return withApiKeyRetry(async (apiKey) => {
+        const ai = new GoogleGenAI({ apiKey });
+        const { criteria, workflow, connections } = config;
+        const { testCase, executionTrace, finalStatus } = result;
 
     const traceSummary = config.auditType === 'real'
         ? executionTrace.map(turn => `\n${turn.nodeId}:\n  User: ${findUserMessageText(turn.input)}\n  Agent: ${findAgentMessageText(turn.output)} ${turn.status === 'ERROR' ? `\n  Error: ${turn.log}` : ''}`).join('')
@@ -877,6 +880,7 @@ const analyzeResult = async (
         console.error("Failed to parse analysis JSON:", response.text);
         throw new Error("Could not analyze the result. The model returned malformed JSON.");
     }
+    }); // Cierre de withApiKeyRetry
 };
 
 export type ConversationState = {

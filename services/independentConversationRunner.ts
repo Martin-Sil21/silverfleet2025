@@ -197,7 +197,23 @@ export async function runConversationIndependently(
                     throw new Error(`Webhook respondió con status ${webhookResponse.status}: ${webhookResponse.statusText}`);
                 }
                 
-                agentResponse = await webhookResponse.json();
+                // Intentar parsear como JSON, si falla asumir texto plano
+                const contentType = webhookResponse.headers.get('content-type');
+                const responseText = await webhookResponse.text();
+                
+                try {
+                    agentResponse = JSON.parse(responseText);
+                } catch (jsonError) {
+                    // Si no es JSON válido, tratar como mensaje de texto directo
+                    console.warn(`   ⚠️ Webhook respondió con texto plano (no JSON):`, responseText.substring(0, 100));
+                    agentResponse = { 
+                        message: responseText,
+                        text: responseText,
+                        // Formato compatible con BuilderBot
+                        messages: [{ body: responseText }]
+                    };
+                }
+                
                 console.log(`   ✅ Respuesta del webhook recibida`);
                 console.log(`   🤖 Agente: "${findAgentMessageText(agentResponse)}"`);
                 
