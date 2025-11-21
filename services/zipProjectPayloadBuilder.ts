@@ -22,7 +22,7 @@ const getLanguageInstruction = (language: string): string => {
 function analyzeEndpoints(endpoints: string[]): Record<string, any> {
   const inferredFields: Record<string, any> = {};
   
-  // Endpoints como /users/:id, /conversations, etc. sugieren campos
+  // Endpoints como /users/:id, /conversations, etc. sugieren cam 
   for (const endpoint of endpoints) {
     if (endpoint.includes('user')) inferredFields.userId = 'user_123';
     if (endpoint.includes('conversation') || endpoint.includes('chat')) {

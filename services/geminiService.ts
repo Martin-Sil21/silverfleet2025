@@ -872,7 +872,6 @@ const analyzeResult = async (
             conversationId: result.id
         });
     }
-
     try {
         const jsonText = response.text.trim();
         return JSON.parse(jsonText);
