@@ -4,6 +4,7 @@ import type { AuditResult, AuditConfig } from '../types';
 import { getCostSummary } from '../services/geminiService';
 import { classifyTable, analyzeChanges, shouldShowNoSaveWarning, type TableType } from '../services/tableClassifier';
 import { aggregateDatabaseChanges, generateDatabaseSummaryText, type ConversationDatabaseTimeline } from '../services/databaseChangeAggregator';
+import { generateFullAIReport, generateLLMReport, type ReportStats } from '../services/aiReportGenerator';
 import AuditMetrics from './AuditMetrics';
 
 interface ExecutiveReportProps {
@@ -31,7 +32,10 @@ const getScoreEmoji = (score: number) => {
 
 const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onReset, onReaudit, onRepeatAudit }) => {
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useState<'overview' | 'objectives' | 'prices' | 'database' | 'conversations' | 'ai-report'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'objectives' | 'prices' | 'database' | 'conversations' | 'ai-report' | 'ai-llm'>('overview');
+  
+  // 🔥 NUEVO: Determinar si mostrar pestañas (solo cuando auditoría está completa)
+  const showTabs = results.length > 0 && results.every(r => r.analysis !== undefined);
 
   const toggleCard = (id: string) => {
     const newSet = new Set(expandedCards);
@@ -150,7 +154,8 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
           </div>
         </div>
         
-        {/* Tabs Horizontales */}
+        {/* Tabs Horizontales - Solo mostrar cuando auditoría está completa */}
+        {showTabs && (
         <div className="flex gap-1 border-b-2 border-gray-300 dark:border-gray-600 overflow-x-auto bg-gray-100 dark:bg-gray-800 rounded-t-xl p-1 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700 scrollbar-track-transparent">
           <ReportTabButton 
             active={activeTab === 'overview'} 
@@ -188,10 +193,17 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
           <ReportTabButton 
             active={activeTab === 'ai-report'} 
             icon="🤖" 
-            label="IA Report"
+            label="Análisis IA"
             onClick={() => setActiveTab('ai-report')}
           />
+          <ReportTabButton 
+            active={activeTab === 'ai-llm'} 
+            icon="⚡" 
+            label="Para LLM"
+            onClick={() => setActiveTab('ai-llm')}
+          />
         </div>
+        )}
         
         {/* Tab Content Container */}
         <div className="bg-white dark:bg-gray-800 rounded-b-2xl rounded-tr-2xl shadow-2xl border-2 border-t-0 border-gray-300 dark:border-gray-600 p-6 sm:p-8 min-h-[600px] max-h-[80vh] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700 scrollbar-track-transparent">
@@ -1221,53 +1233,66 @@ const ExecutiveReport: React.FC<ExecutiveReportProps> = ({ results, config, onRe
       </div>
             )}
             
-            {/* AI REPORT TAB */}
+            {/* AI REPORT TAB - ANÁLISIS COMPLETO */}
             {activeTab === 'ai-report' && (
               <div className="space-y-4">
                 <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-2xl p-6 border-2 border-blue-300 dark:border-blue-700">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-2xl font-bold text-blue-800 dark:text-blue-200 flex items-center gap-2">
                       <span className="text-3xl">🤖</span>
-                      Resumen para IA
+                      Análisis IA Completo
                     </h3>
                     <button
                       onClick={() => {
-                        const report = `# AUDIT REPORT\n\nOverall Score: ${stats.avgScore.toFixed(1)}/10\nConversations: ${results.length}\nPassed: ${stats.passed} (${((stats.passed/results.length)*100).toFixed(0)}%)\nFailed: ${stats.failed}\nPrice Errors: ${stats.totalDbErrors}\nDB Operations: ${stats.totalDbOperations}`;
+                        const report = generateFullAIReport(results, config, stats);
                         navigator.clipboard.writeText(report);
-                        alert('Reporte copiado al portapapeles');
+                        alert('✅ Reporte completo copiado al portapapeles');
                       }}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 transition-colors"
                     >
                       <span>📋</span>
-                      Copiar
+                      Copiar Todo
                     </button>
                   </div>
+                  <p className="text-gray-700 dark:text-gray-300">
+                    Análisis detallado con métricas, problemas críticos, advertencias y recomendaciones completas. 
+                    Ideal para revisión profunda y documentación.
+                  </p>
                 </div>
-                <div className="bg-gray-900 rounded-2xl p-6 font-mono text-sm text-green-400">
-                  <pre className="whitespace-pre-wrap">
-{`# AUDIT REPORT - CONSOLIDATED ANALYSIS
-
-## OVERALL METRICS
-- Total Conversations: ${results.length}
-- Average Score: ${stats.avgScore.toFixed(1)}/10
-- Passed: ${stats.passed} (${((stats.passed/results.length)*100).toFixed(0)}%)
-- Warning: ${stats.warning} (${((stats.warning/results.length)*100).toFixed(0)}%)
-- Failed: ${stats.failed} (${((stats.failed/results.length)*100).toFixed(0)}%)
-
-## DATABASE ACTIVITY
-- Total Operations: ${stats.totalDbOperations}
-- Changes Recorded: ${stats.totalDbChanges}
-- Critical Errors: ${stats.totalDbErrors}
-
-## OBJECTIVES VERIFICATION
-${results.map((r, i) => `${i+1}. ${r.testCase.title}: ${(r.analysis?.overallScore || 0) >= 7 ? '✅ ACHIEVED' : '❌ FAILED'} (${r.analysis?.overallScore.toFixed(1)}/10)`).join('\n')}
-
-## PRICE VERIFICATION
-${stats.totalDbErrors === 0 ? '✅ All prices correct' : `⚠️ ${stats.totalDbErrors} price error(s) detected`}
-
-## RECOMMENDATIONS
-${stats.avgScore >= 8 ? '✅ System performing excellently' : stats.avgScore >= 6 ? '⚠️ System needs improvements' : '❌ Critical issues detected - immediate action required'}`}
-                  </pre>
+                <div className="bg-gray-900 rounded-2xl p-6 font-mono text-sm text-green-400 max-h-[600px] overflow-y-auto">
+                  <pre className="whitespace-pre-wrap">{generateFullAIReport(results, config, stats)}</pre>
+                </div>
+              </div>
+            )}
+            
+            {/* AI LLM TAB - PARA CURSOR/LOVABLE */}
+            {activeTab === 'ai-llm' && (
+              <div className="space-y-4">
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-2xl p-6 border-2 border-purple-300 dark:border-purple-700">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-2xl font-bold text-purple-800 dark:text-purple-200 flex items-center gap-2">
+                      <span className="text-3xl">⚡</span>
+                      Para LLM (Cursor/Lovable)
+                    </h3>
+                    <button
+                      onClick={() => {
+                        const report = generateLLMReport(results, config, stats);
+                        navigator.clipboard.writeText(report);
+                        alert('✅ Fix Guide copiado - Pégalo en Cursor o Lovable');
+                      }}
+                      className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2 transition-colors"
+                    >
+                      <span>⚡</span>
+                      Copiar Fix Guide
+                    </button>
+                  </div>
+                  <p className="text-gray-700 dark:text-gray-300">
+                    Reporte conciso y accionable: <strong>qué arreglar, cómo y por qué</strong>. 
+                    Optimizado para Cursor, Lovable, Claude y otros LLMs de desarrollo.
+                  </p>
+                </div>
+                <div className="bg-gray-900 rounded-2xl p-6 font-mono text-sm text-cyan-400 max-h-[600px] overflow-y-auto">
+                  <pre className="whitespace-pre-wrap">{generateLLMReport(results, config, stats)}</pre>
                 </div>
               </div>
             )}
