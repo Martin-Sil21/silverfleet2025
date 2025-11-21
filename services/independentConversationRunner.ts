@@ -104,20 +104,22 @@ export async function runConversationIndependently(
             }
             
             // ========== 4. PREPARAR PAYLOAD PARA EL WEBHOOK ==========
-            // 🔥 CRÍTICO: NO hacer spread del initialPayload completo porque incluye el body original
-            // Solo copiar los campos de identificación (session_id, from, pushName) y usar el NUEVO mensaje
+            // 🔥 CRÍTICO: Preservar TODOS los campos del payload inicial (excepto el body)
+            // para que el webhook reciba el contexto completo (type, timestamp, mediaUrl, etc)
             const webhookPayload: Record<string, any> = {
-                // Campos de identificación (sin el body original)
-                session_id: conv.testCase.initialPayload.session_id || conv.testCase.initialPayload.sessionId || conv.testCase.id,
-                from: conv.testCase.initialPayload.from || conv.testCase.initialPayload.session_id || conv.testCase.id,
-                pushName: conv.testCase.initialPayload.pushName || conv.testCase.initialPayload.nombre || conv.testCase.initialPayload.name || 'Test User',
+                // Copiar TODOS los campos originales
+                ...conv.testCase.initialPayload,
                 
-                // MENSAJE NUEVO (usar 'body' porque es lo que espera el webhook de WhatsApp/BuilderBot)
+                // Sobrescribir solo el mensaje con el nuevo texto generado
                 body: userMessage,
                 
-                // Campos adicionales útiles
+                // Agregar metadatos de auditoría (útiles para tracking)
                 conversationId: conv.testCase.id,
-                turnNumber: turnNumber
+                turnNumber: turnNumber,
+                
+                // Asegurar que session_id/from existan (fallbacks por seguridad)
+                session_id: conv.testCase.initialPayload.session_id || conv.testCase.initialPayload.sessionId || conv.testCase.id,
+                from: conv.testCase.initialPayload.from || conv.testCase.initialPayload.session_id || conv.testCase.id
             };
             
             console.log(`   🌐 Enviando al webhook: ${config.endpointUrl}`);

@@ -1256,6 +1256,20 @@ export const runFullAudit = async (
 
         onProgress({ message: "\n🎉 Todas las conversaciones finalizadas!" });
 
+        // 📊 TELEMETRÍA: Resumen de estados de conversaciones
+        const completedSuccessfully = conversations.filter(c => c.finalStatus === 'SUCCESS' || c.finalStatus === 'PENDING').length;
+        const timedOut = conversations.filter(c => c.finalStatus === 'TIMEOUT').length;
+        const failed = conversations.filter(c => c.finalStatus === 'ERROR').length;
+        
+        onProgress({ message: `📊 Resumen de ejecución:` });
+        onProgress({ message: `   ✅ Completadas: ${completedSuccessfully}/${conversations.length} (${((completedSuccessfully/conversations.length)*100).toFixed(0)}%)` });
+        if (timedOut > 0) {
+            onProgress({ message: `   ⏱️ Timeouts: ${timedOut} (${((timedOut/conversations.length)*100).toFixed(0)}%)` });
+        }
+        if (failed > 0) {
+            onProgress({ message: `   ❌ Errores: ${failed} (${((failed/conversations.length)*100).toFixed(0)}%)` });
+        }
+
         // TODO: El código viejo del bucle sincrónico se eliminó.
         // Ahora cada conversación avanza independientemente en runConversationIndependently()
         

@@ -438,6 +438,15 @@ class RealDatabaseAuditor {
    * Toma una "foto" del estado actual de la base de datos
    */
   async takeSnapshot(): Promise<DatabaseSnapshot> {
+    // 🔥 RATE LIMITING: Agregar pequeño delay aleatorio para evitar sobrecarga
+    // cuando múltiples conversaciones hacen snapshot simultáneamente
+    if (this.snapshots.size > 0) { // Solo después del primer snapshot
+      const randomDelay = Math.floor(Math.random() * 500); // 0-500ms
+      if (randomDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
+      }
+    }
+    
     const timestamp = Date.now();
     const data: Record<string, any[]> = {};
 

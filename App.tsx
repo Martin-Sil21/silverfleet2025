@@ -81,10 +81,10 @@ const App: React.FC = () => {
   }, []);
 
   const handleResultComplete = useCallback((result: AuditResult) => {
-    console.log(`📊 [App.tsx] handleResultComplete llamado para: "${result.testCase.title}"`);
+    console.log(`📊 [CRITICAL] Resultado completado: "${result.testCase.title}" - Score: ${result.analysis?.overallScore.toFixed(1) || 'N/A'} - Status: ${result.finalStatus}`);
     setAuditResults(prevResults => {
       const newResults = [...prevResults, result];
-      console.log(`📊 [App.tsx] Total resultados ahora: ${newResults.length}`);
+      console.log(`📊 [CRITICAL] Total resultados acumulados: ${newResults.length}`);
       return newResults;
     });
   }, []);
