@@ -966,6 +966,27 @@ class RealDatabaseAuditor {
   }
 
   /**
+   * Obtiene las columnas que realmente existen en una tabla
+   */
+  private async getTableColumns(tableName: string): Promise<string[]> {
+    try {
+      const { data, error } = await this.client
+        .from(tableName)
+        .select('*')
+        .limit(1);
+      
+      if (error || !data || data.length === 0) {
+        return [];
+      }
+      
+      return Object.keys(data[0]);
+    } catch (error) {
+      console.warn(`   ⚠️ No se pudo obtener columnas de ${tableName}`);
+      return [];
+    }
+  }
+
+  /**
    * Verifica que un usuario NO esté bloqueado
    * ✨ USA MAPPINGS AUTO-DETECTADOS
    */
@@ -974,6 +995,8 @@ class RealDatabaseAuditor {
     await this.initializeFieldMappings();
     
     console.log(`🔍 [DB Audit] Verificando que usuario NO esté bloqueado: ${context}`);
+    console.log(`   🔑 userId: ${userId}`);
+    console.log(`   📋 searchIdentifiers disponibles:`, this.searchIdentifiers);
     
     // Try auto-detected user table first
     const detectedTables = this.fieldMappings?.userTable 
@@ -986,51 +1009,104 @@ class RealDatabaseAuditor {
     for (const tableName of possibleTables) {
       // Skip tables that aren't in our monitored list
       if (!this.config.tables.includes(tableName)) {
+        console.log(`   ⏭️ Saltando tabla "${tableName}" (no está en lista de monitoreo)`);
         continue;
       }
       
       try {
+        // 🆕 PRIMERO: Obtener columnas que realmente existen
+        const existingColumns = await this.getTableColumns(tableName);
+        if (existingColumns.length === 0) {
+          console.log(`   ⚠️ No se pudo leer columnas de "${tableName}", saltando...`);
+          continue;
+        }
+        
+        console.log(`   📋 Columnas disponibles en "${tableName}":`, existingColumns);
+        
         // Use detected fields or fallback to common names
-        const blockedFields = this.fieldMappings?.userBlockedField 
+        const possibleBlockedFields = this.fieldMappings?.userBlockedField 
           ? [this.fieldMappings.userBlockedField]
-          : ['bloqueado', 'blocked'];
+          : ['bloqueado', 'blocked', 'is_blocked', 'bloqueo', 'is_bloqued'];
         
-        const statusFields = this.fieldMappings?.userStatusField
+        const possibleStatusFields = this.fieldMappings?.userStatusField
           ? [this.fieldMappings.userStatusField]
-          : ['estado', 'status'];
+          : ['estado', 'status', 'state', 'status_conversacion'];
         
-        const selectFields = [...blockedFields, ...statusFields].join(', ');
+        // 🆕 FILTRAR: Solo campos que existen en la tabla
+        const blockedFields = possibleBlockedFields.filter(f => existingColumns.includes(f));
+        const statusFields = possibleStatusFields.filter(f => existingColumns.includes(f));
         
-        const { data, error } = await this.client
-          .from(tableName)
-          .select(selectFields)
-          .eq('id', userId)
-          .single();
+        console.log(`   🔍 Campos de bloqueo encontrados:`, blockedFields);
+        console.log(`   🔍 Campos de estado encontrados:`, statusFields);
         
-        if (error) {
-          // Table might not exist or user not found, try next table
-          if (error.code === '42P01' || error.code === 'PGRST116') {
-            console.log(`   ℹ️ Tabla ${tableName} no existe o usuario no encontrado, continuando...`);
+        if (blockedFields.length === 0 && statusFields.length === 0) {
+          console.log(`   ⚠️ No se encontraron campos de bloqueo/estado en "${tableName}"`);
+          continue;
+        }
+        
+        // Try with different identifier fields
+        const possibleIdFields = ['id', 'session_id', 'from', 'telefono', 'phone', 'usuario_id', 'user_id', 'conversacion_id'];
+        const idFields = possibleIdFields.filter(f => existingColumns.includes(f));
+        
+        console.log(`   🔑 Campos de ID encontrados:`, idFields);
+        
+        let userData = null;
+        let foundWith = null;
+        
+        for (const idField of idFields) {
+          try {
+            // 🆕 SOLO seleccionar campos que existen
+            const selectFields = [...blockedFields, ...statusFields, idField];
+            const selectQuery = selectFields.join(', ');
+            
+            console.log(`   🔎 Intentando query con campo "${idField}":`, selectQuery);
+            
+            const { data, error } = await this.client
+              .from(tableName)
+              .select(selectQuery)
+              .or(this.searchIdentifiers.map(id => `${idField}.eq.${id}`).join(','))
+              .limit(1);
+            
+            if (error) {
+              console.warn(`   ⚠️ Error en query con "${idField}":`, error.message);
+              continue;
+            }
+            
+            if (data && data.length > 0) {
+              userData = data[0];
+              foundWith = idField;
+              console.log(`   ✅ Usuario encontrado en "${tableName}" usando campo "${idField}"`);
+              break;
+            }
+          } catch (e: any) {
+            console.warn(`   ⚠️ Excepción con "${idField}":`, e.message);
             continue;
           }
-          throw error;
+        }
+        
+        if (!userData) {
+          console.log(`   ℹ️ Usuario no encontrado en tabla "${tableName}", continuando...`);
+          continue;
         }
         
         // Check blocked status using detected or common field names
-        const isBlocked = blockedFields.some(field => data[field] === true) ||
-                         statusFields.some(field => data[field] === 'bloqueado' || data[field] === 'blocked');
+        const isBlocked = blockedFields.some(field => userData[field] === true || userData[field] === 1 || userData[field] === '1') ||
+                         statusFields.some(field => userData[field] === 'bloqueado' || userData[field] === 'blocked' || userData[field] === 'BLOCKED');
+        
+        console.log(`   📊 Datos del usuario:`, userData);
+        console.log(`   🔐 ¿Bloqueado?`, isBlocked);
         
         if (isBlocked) {
           this.discrepancies.push({
             type: 'unauthorized_action',
             severity: 'critical',
-            description: `${context}: Usuario ${userId} fue bloqueado durante la conversación`,
+            description: `${context}: Usuario fue bloqueado durante la conversación`,
             expected: { bloqueado: false },
-            actual: { bloqueado: data.bloqueado, estado: data.estado },
+            actual: userData,
             table: tableName,
             timestamp: Date.now()
           });
-          console.log(`   ❌ USUARIO BLOQUEADO (tabla: ${tableName})`);
+          console.log(`   ❌ USUARIO BLOQUEADO (tabla: ${tableName}, campo: ${foundWith})`);
           return false;
         }
         

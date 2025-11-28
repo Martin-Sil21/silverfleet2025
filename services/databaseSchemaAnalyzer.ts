@@ -57,24 +57,18 @@ async function fetchDatabaseSchema(
   
   for (const tableName of tables) {
     try {
-      // Get table structure using Supabase introspection
-      const { data, error } = await supabase
+      // 🆕 Intentar obtener al menos 1 registro para ver columnas reales
+      const { data: sampleData, error } = await supabase
         .from(tableName)
         .select('*')
-        .limit(0); // Get structure without data
+        .limit(1);
       
       if (error) {
         console.warn(`   ⚠️ No se pudo leer schema de ${tableName}:`, error.message);
         continue;
       }
       
-      // Get column names from first query (empty result set has column info)
-      // We need to do a real query to get column names
-      const { data: sampleData } = await supabase
-        .from(tableName)
-        .select('*')
-        .limit(1);
-      
+      // Si hay datos, usar esos para determinar columnas
       if (sampleData && sampleData.length > 0) {
         const columns = Object.keys(sampleData[0]).map(col => ({
           column_name: col,
@@ -87,10 +81,14 @@ async function fetchDatabaseSchema(
           columns
         });
         
-        console.log(`   ✅ ${tableName}: ${columns.length} columnas`);
+        console.log(`   ✅ ${tableName}: ${columns.length} columnas detectadas`);
+        console.log(`      Columnas:`, columns.map(c => c.column_name).join(', '));
+      } else {
+        // 🆕 Si la tabla está vacía, intentar usar información del error o metadata
+        console.warn(`   ⚠️ ${tableName} está vacía, no se puede analizar estructura`);
       }
-    } catch (error) {
-      console.warn(`   ⚠️ Error leyendo ${tableName}:`, error);
+    } catch (error: any) {
+      console.warn(`   ⚠️ Error leyendo ${tableName}:`, error.message);
     }
   }
   
@@ -151,6 +149,9 @@ Identifica qué tabla y qué campos corresponden a:
 - Si una entidad NO existe en el schema, deja el campo como null
 - Prioriza tablas/campos con nombres en español o inglés
 - Usa lógica semántica: "precio", "price", "cost", "valor" son lo mismo
+- Para campos de bloqueo busca: "bloqueado", "blocked", "is_blocked", "is_bloqued", "bloqueo"
+- Para campos de estado busca: "estado", "status", "state", "status_conversacion"
+- IMPORTANTE: Verifica que los campos existan exactamente como se escriben en las columnas
 - Responde SOLO con JSON válido, sin explicaciones
 
 **FORMATO DE RESPUESTA:**

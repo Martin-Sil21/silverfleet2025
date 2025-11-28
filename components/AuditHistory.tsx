@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import type { HistoricalAudit } from '../types';
-import Card from './Card';
 import { useTranslation } from '../hooks/useTranslation';
 import * as historyService from '../services/historyService';
 import { TrashIcon } from './icons/TrashIcon';
@@ -26,24 +25,39 @@ const AuditHistory: React.FC<AuditHistoryProps> = ({ onViewReport }) => {
     };
     
     return (
-        <Card>
-            <h3 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">{t('auditHistoryTitle')}</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">{t('auditHistoryDescription')}</p>
-            <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
+        <div>
+            <div className="space-y-3">
                 {history.length === 0 ? (
-                    <p className="text-center text-gray-500 dark:text-gray-400 py-4">{t('noHistory')}</p>
+                    <div className="text-center py-12">
+                        <div className="text-6xl mb-4 opacity-50">📭</div>
+                        <p className="text-gray-500 dark:text-gray-400">{t('noHistory')}</p>
+                    </div>
                 ) : (
                     history.map(item => (
-                        <div key={item.id} className="p-3 bg-gray-100 dark:bg-gray-700/50 rounded-lg flex items-center justify-between gap-2">
-                            <div>
-                                <p className="font-semibold text-gray-800 dark:text-white">{new Date(item.timestamp).toLocaleString()}</p>
-                                <p className="text-sm text-gray-600 dark:text-gray-400">Score: {item.overallScore.toFixed(1)} | {item.results.length} cases</p>
+                        <div key={item.id} className="p-4 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700/50 dark:to-gray-800/50 rounded-lg flex items-center justify-between gap-3 hover:shadow-md transition-all border border-gray-200 dark:border-gray-600">
+                            <div className="flex-1">
+                                <p className="font-semibold text-gray-800 dark:text-white flex items-center gap-2">
+                                    <span className="text-lg">🕐</span>
+                                    {new Date(item.timestamp).toLocaleString()}
+                                </p>
+                                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                                    Score: <span className="font-bold text-primary-600 dark:text-primary-400">{item.overallScore.toFixed(1)}</span> | 
+                                    <span className="ml-2">{item.results.length} casos de prueba</span>
+                                </p>
                             </div>
                             <div className="flex items-center gap-2">
-                                <button onClick={() => onViewReport(item)} title={t('viewReport')} className="p-2 rounded-full hover:bg-primary-100 dark:hover:bg-primary-900 text-primary-600 dark:text-primary-300">
+                                <button 
+                                    onClick={() => onViewReport(item)} 
+                                    title={t('viewReport')} 
+                                    className="p-2.5 rounded-lg bg-primary-500 hover:bg-primary-600 text-white transition-colors"
+                                >
                                     <EyeIcon className="w-5 h-5"/>
                                 </button>
-                                <button onClick={() => handleDelete(item.id)} title={t('delete')} className="p-2 rounded-full hover:bg-red-100 dark:hover:bg-red-900 text-red-600 dark:text-red-400">
+                                <button 
+                                    onClick={() => handleDelete(item.id)} 
+                                    title={t('delete')} 
+                                    className="p-2.5 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors"
+                                >
                                     <TrashIcon className="w-5 h-5"/>
                                 </button>
                             </div>
@@ -51,7 +65,7 @@ const AuditHistory: React.FC<AuditHistoryProps> = ({ onViewReport }) => {
                     ))
                 )}
             </div>
-        </Card>
+        </div>
     );
 };
 

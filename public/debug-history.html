@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debug Historial - Silver Fleet</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #00ff00;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #000;
+            padding: 20px;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+        }
+        h1 { color: #00ff00; text-align: center; }
+        button {
+            background: #00ff00;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            border-radius: 4px;
+        }
+        button:hover { background: #00dd00; }
+        .output {
+            background: #111;
+            padding: 15px;
+            border: 1px solid #00ff00;
+            margin: 10px 0;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .success { color: #00ff00; }
+        .error { color: #ff0000; }
+        .warning { color: #ffaa00; }
+        .info { color: #00aaff; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Silver Fleet - Debug Historial de Auditorías</h1>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <button onclick="checkLocalStorage()">🔍 Verificar localStorage</button>
+            <button onclick="viewHistory()">📋 Ver Historial</button>
+            <button onclick="testSave()">💾 Test Guardar</button>
+            <button onclick="clearHistory()">🗑️ Limpiar Historial</button>
+            <button onclick="exportHistory()">📤 Exportar JSON</button>
+        </div>
+        
+        <div id="output" class="output">
+            <span class="info">Haz clic en un botón para iniciar diagnóstico...</span>
+        </div>
+    </div>
+
+    <script>
+        const HISTORY_KEY = 'silver-fleet-audit-history';
+        const output = document.getElementById('output');
+
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `[${timestamp}] ${message}\n`;
+            output.appendChild(span);
+        }
+
+        function clear() {
+            output.innerHTML = '';
+        }
+
+        function checkLocalStorage() {
+            clear();
+            log('🔍 Iniciando verificación de localStorage...', 'info');
+            
+            // Test 1: localStorage disponible
+            if (typeof localStorage === 'undefined') {
+                log('❌ ERROR: localStorage NO está disponible', 'error');
+                return;
+            }
+            log('✅ localStorage disponible', 'success');
+            
+            // Test 2: Permisos de escritura/lectura
+            try {
+                localStorage.setItem('test-key-debug', 'test-value');
+                const readBack = localStorage.getItem('test-key-debug');
+                localStorage.removeItem('test-key-debug');
+                
+                if (readBack === 'test-value') {
+                    log('✅ Lectura/escritura funcionando', 'success');
+                } else {
+                    log('❌ ERROR: Lectura no devolvió el valor correcto', 'error');
+                }
+            } catch (e) {
+                log(`❌ ERROR de lectura/escritura: ${e.message}`, 'error');
+                return;
+            }
+            
+            // Test 3: Verificar clave del historial
+            const historyData = localStorage.getItem(HISTORY_KEY);
+            if (historyData) {
+                log(`✅ Clave '${HISTORY_KEY}' encontrada`, 'success');
+                log(`📊 Tamaño: ${historyData.length} caracteres`, 'info');
+                
+                try {
+                    const parsed = JSON.parse(historyData);
+                    log(`✅ JSON válido`, 'success');
+                    log(`📊 Auditorías guardadas: ${parsed.length}`, 'info');
+                    
+                    if (parsed.length > 0) {
+                        log(`\n📋 Última auditoría:`, 'info');
+                        log(`   ID: ${parsed[0].id}`, 'info');
+                        log(`   Nombre: ${parsed[0].config.name}`, 'info');
+                        log(`   Timestamp: ${new Date(parsed[0].timestamp).toLocaleString()}`, 'info');
+                        log(`   Resultados: ${parsed[0].results.length} casos`, 'info');
+                    }
+                } catch (e) {
+                    log(`❌ ERROR: JSON inválido - ${e.message}`, 'error');
+                    log(`📄 Primeros 100 caracteres: ${historyData.substring(0, 100)}`, 'warning');
+                }
+            } else {
+                log(`⚠️ Clave '${HISTORY_KEY}' no encontrada (historial vacío)`, 'warning');
+            }
+            
+            // Test 4: Espacio disponible
+            try {
+                let size = 0;
+                for (let key in localStorage) {
+                    if (localStorage.hasOwnProperty(key)) {
+                        size += localStorage[key].length + key.length;
+                    }
+                }
+                log(`\n📊 Espacio usado en localStorage: ${(size / 1024).toFixed(2)} KB`, 'info');
+                log(`📊 Claves totales: ${Object.keys(localStorage).length}`, 'info');
+            } catch (e) {
+                log(`⚠️ No se pudo calcular espacio: ${e.message}`, 'warning');
+            }
+        }
+
+        function viewHistory() {
+            clear();
+            log('📋 Leyendo historial de auditorías...', 'info');
+            
+            const historyData = localStorage.getItem(HISTORY_KEY);
+            if (!historyData) {
+                log('⚠️ No hay historial guardado', 'warning');
+                return;
+            }
+            
+            try {
+                const audits = JSON.parse(historyData);
+                log(`✅ ${audits.length} auditorías encontradas\n`, 'success');
+                
+                audits.forEach((audit, index) => {
+                    log(`\n━━━ Auditoría #${index + 1} ━━━`, 'info');
+                    log(`ID: ${audit.id}`, 'info');
+                    log(`Nombre: ${audit.config.name}`, 'info');
+                    log(`Fecha: ${new Date(audit.timestamp).toLocaleString()}`, 'info');
+                    log(`Score promedio: ${audit.overallScore.toFixed(2)}/10`, 'info');
+                    log(`Test cases: ${audit.results.length}`, 'info');
+                    log(`Tipo: ${audit.config.auditType}`, 'info');
+                    if (audit.config.endpointUrl) {
+                        log(`Endpoint: ${audit.config.endpointUrl}`, 'info');
+                    }
+                });
+            } catch (e) {
+                log(`❌ ERROR parseando historial: ${e.message}`, 'error');
+            }
+        }
+
+        function testSave() {
+            clear();
+            log('💾 Probando guardado de auditoría de prueba...', 'info');
+            
+            try {
+                const testAudit = {
+                    id: `audit_test_${Date.now()}`,
+                    timestamp: Date.now(),
+                    config: {
+                        name: 'TEST AUDIT - DEBUG',
+                        auditType: 'visual',
+                        testCaseCount: 1,
+                        criteria: ['Test criterion']
+                    },
+                    results: [],
+                    overallScore: 10
+                };
+                
+                const existing = localStorage.getItem(HISTORY_KEY);
+                const audits = existing ? JSON.parse(existing) : [];
+                audits.unshift(testAudit);
+                
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(audits));
+                log('✅ Auditoría de prueba guardada', 'success');
+                
+                // Verificar
+                const verification = localStorage.getItem(HISTORY_KEY);
+                const parsed = JSON.parse(verification);
+                
+                if (parsed[0].id === testAudit.id) {
+                    log('✅ Verificación exitosa - auditoría encontrada', 'success');
+                    log(`📊 Total auditorías ahora: ${parsed.length}`, 'info');
+                } else {
+                    log('❌ ERROR: Auditoría no encontrada después de guardar', 'error');
+                }
+            } catch (e) {
+                log(`❌ ERROR en test de guardado: ${e.message}`, 'error');
+            }
+        }
+
+        function clearHistory() {
+            if (!confirm('¿Estás seguro de que quieres borrar TODO el historial?')) {
+                return;
+            }
+            
+            clear();
+            log('🗑️ Borrando historial...', 'warning');
+            
+            try {
+                localStorage.removeItem(HISTORY_KEY);
+                log('✅ Historial borrado exitosamente', 'success');
+                
+                const verification = localStorage.getItem(HISTORY_KEY);
+                if (verification === null) {
+                    log('✅ Verificación: clave eliminada correctamente', 'success');
+                } else {
+                    log('⚠️ Advertencia: clave aún existe', 'warning');
+                }
+            } catch (e) {
+                log(`❌ ERROR borrando historial: ${e.message}`, 'error');
+            }
+        }
+
+        function exportHistory() {
+            clear();
+            log('📤 Exportando historial...', 'info');
+            
+            const historyData = localStorage.getItem(HISTORY_KEY);
+            if (!historyData) {
+                log('⚠️ No hay historial para exportar', 'warning');
+                return;
+            }
+            
+            try {
+                // Crear blob y descargar
+                const blob = new Blob([historyData], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `silver-fleet-history-${Date.now()}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                log('✅ Historial exportado exitosamente', 'success');
+                
+                const audits = JSON.parse(historyData);
+                log(`📊 ${audits.length} auditorías exportadas`, 'info');
+            } catch (e) {
+                log(`❌ ERROR exportando: ${e.message}`, 'error');
+            }
+        }
+
+        // Auto-run verificación al cargar
+        window.addEventListener('load', () => {
+            setTimeout(checkLocalStorage, 500);
+        });
+    </script>
+</body>
+</html>

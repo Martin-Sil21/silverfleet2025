@@ -223,9 +223,9 @@ const ObjectivesTab: React.FC<{ result: AuditResult }> = ({ result }) => {
     if (!result.analysis || score === undefined) {
         return (
             <div className="space-y-6 max-w-3xl mx-auto">
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-2xl p-12 border-2 border-blue-300 dark:border-blue-700 shadow-lg text-center">
-                    <div className="text-6xl mb-4 animate-pulse">🎯</div>
-                    <h3 className="text-2xl font-bold text-blue-800 dark:text-blue-200 mb-3">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-2xl p-6 border-2 border-blue-300 dark:border-blue-700 shadow-lg text-center">
+                    <div className="text-4xl mb-4 animate-pulse">🎯</div>
+                    <h3 className="text-lg font-bold text-blue-800 dark:text-blue-200 mb-3">
                         Analizando Objetivos...
                     </h3>
                     <p className="text-blue-700 dark:text-blue-300">
@@ -250,9 +250,9 @@ const ObjectivesTab: React.FC<{ result: AuditResult }> = ({ result }) => {
             {/* Header del objetivo */}
             <div className="bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 rounded-2xl p-6 border-2 border-purple-300 dark:border-purple-700 shadow-lg">
                 <div className="flex items-start gap-4">
-                    <span className="text-5xl">🎯</span>
+                    <span className="text-3xl">🎯</span>
                     <div className="flex-1">
-                        <h3 className="text-2xl font-bold text-purple-800 dark:text-purple-200 mb-2">
+                        <h3 className="text-lg font-bold text-purple-800 dark:text-purple-200 mb-2">
                             Objetivo de la Conversación
                         </h3>
                         <p className="text-lg text-purple-700 dark:text-purple-300">
@@ -268,8 +268,8 @@ const ObjectivesTab: React.FC<{ result: AuditResult }> = ({ result }) => {
                     ? 'bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/30 dark:to-emerald-900/30 border-green-400 dark:border-green-600' 
                     : 'bg-gradient-to-br from-red-50 to-pink-50 dark:from-red-900/30 dark:to-pink-900/30 border-red-400 dark:border-red-600'
             }`}>
-                <div className="text-8xl mb-4">{objectiveAchieved ? '✅' : '❌'}</div>
-                <h4 className={`text-3xl font-bold mb-3 ${
+                <div className="text-5xl mb-4">{objectiveAchieved ? '✅' : '❌'}</div>
+                <h4 className={`text-xl font-bold mb-3 ${
                     objectiveAchieved ? 'text-green-800 dark:text-green-200' : 'text-red-800 dark:text-red-200'
                 }`}>
                     {objectiveAchieved ? 'Objetivo Cumplido' : 'Objetivo NO Cumplido'}
@@ -287,7 +287,7 @@ const ObjectivesTab: React.FC<{ result: AuditResult }> = ({ result }) => {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-5 shadow-lg border-2 border-gray-200 dark:border-gray-700">
                     <div className="flex items-center gap-3 mb-3">
-                        <span className="text-3xl">📊</span>
+                        <span className="text-2xl">📊</span>
                         <div>
                             <p className="text-sm text-gray-600 dark:text-gray-400 font-semibold">Score Final</p>
                             <p className={`text-3xl font-bold ${

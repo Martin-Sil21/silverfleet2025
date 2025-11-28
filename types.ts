@@ -77,6 +77,7 @@ export interface CriterionAnalysis {
   justification: string;
   evidence?: string[]; // Evidencia cuantificable
   impact?: 'high' | 'medium' | 'low'; // Impacto del hallazgo
+  recommendation?: string; // Recomendación específica para corregir este criterio
 }
 
 export interface KeyFinding {
@@ -96,6 +97,15 @@ export interface Analysis {
   riskAssessment?: 'high' | 'medium' | 'low'; // Evaluación de riesgo
   recommendations?: string[]; // Recomendaciones accionables
   goalAchieved?: boolean; // Si se logró el objetivo de la persona
+  priceAnalysis?: PriceAnalysis; // Análisis de precios mencionados
+}
+
+export interface PriceAnalysis {
+  mentioned?: Array<{ source: string; value: number; context: string }>; // Precios mencionados en conversación
+  inDB?: Array<{ source: string; value: number; context: string }>; // Precios en base de datos
+  inPrompt?: Array<{ source: string; value: number; context: string }>; // Precios en prompts del sistema
+  consistent: boolean; // Si los precios son consistentes entre fuentes
+  discrepancies?: string[]; // Lista de inconsistencias encontradas
 }
 
 export interface ExecutionStep {

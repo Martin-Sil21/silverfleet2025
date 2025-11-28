@@ -766,7 +766,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
   // ============================================================================
   
   const renderStepIndicator = () => (
-    <div className="flex items-center justify-center gap-4 mb-8">
+    <div className="flex items-center justify-center gap-4 mb-4">
       {[1, 2, 3, 4, 5].map((step) => {
         const isActive = step === currentStep;
         
@@ -1001,7 +1001,7 @@ const AgentConfig: React.FC<AgentConfigProps> = ({ onStartAudit, onViewHistory, 
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
           {t('importN8nDescription')}
         </p>
-        <div className={`relative border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+        <div className={`relative border-2 border-dashed rounded-lg p-3 text-center transition-colors ${
           parsedN8nData 
             ? 'border-green-300 dark:border-green-600 bg-green-50 dark:bg-green-900/20' 
             : 'border-gray-300 dark:border-gray-600 hover:border-primary-500 dark:hover:border-primary-400'

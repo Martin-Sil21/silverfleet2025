@@ -39,8 +39,52 @@ const App: React.FC = () => {
 
   useEffect(() => {
     // Save the audit automatically when it's finished and not a history view
+    console.log('📝 [History] useEffect triggered');
+    console.log('📝 [History] Status:', auditStatus);
+    console.log('📝 [History] Config exists:', !!auditConfig);
+    console.log('📝 [History] Config name:', auditConfig?.name);
+    console.log('📝 [History] Results count:', auditResults.length);
+    console.log('📝 [History] Is viewing history:', isViewingHistory);
+    
     if (auditStatus === AuditStatus.REPORT_READY && auditConfig && auditResults.length > 0 && !isViewingHistory) {
-      historyService.saveAudit(auditConfig, auditResults);
+      console.log('✅ [History] Condiciones cumplidas - intentando guardar auditoría...');
+      console.log('📊 [History] Config name:', auditConfig.name);
+      console.log('📊 [History] Results:', auditResults.length, 'casos');
+      console.log('📊 [History] First result ID:', auditResults[0]?.id);
+      console.log('📊 [History] Last result ID:', auditResults[auditResults.length - 1]?.id);
+      
+      try {
+        historyService.saveAudit(auditConfig, auditResults);
+        console.log('✅ [History] Auditoría guardada exitosamente desde useEffect');
+        
+        // Verificar que se guardó
+        const saved = historyService.getAudits();
+        console.log('📊 [History] Total auditorías en localStorage después de guardar:', saved.length);
+        if (saved.length > 0) {
+          console.log('📊 [History] Última auditoría guardada:', {
+            id: saved[0].id,
+            timestamp: new Date(saved[0].timestamp).toLocaleString(),
+            name: saved[0].config.name,
+            resultsCount: saved[0].results.length
+          });
+        }
+      } catch (error) {
+        console.error('❌ [History] Error guardando auditoría desde useEffect:', error);
+      }
+    } else {
+      console.log('⏭️ [History] No se guarda (condiciones no cumplidas)');
+      if (auditStatus !== AuditStatus.REPORT_READY) {
+        console.log('   ❌ Status no es REPORT_READY:', auditStatus);
+      }
+      if (!auditConfig) {
+        console.log('   ❌ No hay auditConfig');
+      }
+      if (auditResults.length === 0) {
+        console.log('   ❌ auditResults está vacío');
+      }
+      if (isViewingHistory) {
+        console.log('   ❌ isViewingHistory es true');
+      }
     }
   }, [auditStatus, auditConfig, auditResults, isViewingHistory]);
 
@@ -89,11 +133,46 @@ const App: React.FC = () => {
     });
   }, []);
 
-  const handleAllComplete = useCallback(() => {
-    console.log('🏁🏁🏁 [App.tsx] handleAllComplete LLAMADO - Cambiando estado a REPORT_READY');
+  const handleAllComplete = useCallback((allResults: AuditResult[]) => {
+    console.log('🏁🏁🏁 [App.tsx] handleAllComplete LLAMADO con resultados completos');
+    console.log('📊 [App.tsx] Resultados recibidos:', allResults.length);
+    console.log('📊 [App.tsx] Current auditResults (estado):', auditResults.length);
+    console.log('📊 [App.tsx] Current auditConfig:', auditConfig?.name);
+    console.log('📊 [App.tsx] Is viewing history:', isViewingHistory);
+    
+    // 🔥 CRÍTICO: Usar los resultados pasados directamente, no el estado
+    if (auditConfig && allResults.length > 0 && !isViewingHistory) {
+      console.log('💾 [App.tsx] Guardando auditoría INMEDIATAMENTE con resultados completos...');
+      console.log('📊 [App.tsx] Resultados a guardar:', allResults.map(r => r.testCase.title).join(', '));
+      
+      try {
+        historyService.saveAudit(auditConfig, allResults);
+        console.log('✅ [App.tsx] Auditoría guardada exitosamente en handleAllComplete');
+        
+        // Verificar que se guardó
+        const saved = historyService.getAudits();
+        console.log('📊 [App.tsx] Total auditorías después de guardar:', saved.length);
+        if (saved.length > 0) {
+          console.log('📊 [App.tsx] Primera auditoría guardada:', {
+            id: saved[0].id,
+            name: saved[0].config.name,
+            results: saved[0].results.length
+          });
+        }
+      } catch (error) {
+        console.error('❌ [App.tsx] Error guardando auditoría:', error);
+      }
+    } else {
+      console.warn('⚠️ [App.tsx] No se puede guardar auditoría en handleAllComplete:', {
+        hasConfig: !!auditConfig,
+        resultsCount: allResults.length,
+        isViewingHistory
+      });
+    }
+    
     setAuditStatus(AuditStatus.REPORT_READY);
     console.log('✅ [App.tsx] Estado cambiado a REPORT_READY');
-  }, []);
+  }, [auditConfig, isViewingHistory]);
 
   const handleStartAudit = useCallback(async (data: { config: AuditConfig, n8nData: ParsedN8nWorkflow | null, codeProject?: ParsedCodeProject }) => {
     setAuditStatus(AuditStatus.AUDITING);
@@ -382,20 +461,16 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
-      <div className="max-w-7xl mx-auto">
-        <header className="mb-10">
-          <div className="flex justify-between items-start">
-            <div className="flex-1 text-center">
-              <div className="flex items-center justify-center gap-4">
-                <ShieldCheckIcon className="w-12 h-12 text-primary-500" />
-                <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-gray-800 dark:text-white">
-                  {t('appTitle')}
-                </h1>
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-3">
+      <div className="max-w-[1400px] mx-auto">
+        <header className="mb-4 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              <ShieldCheckIcon className="w-8 h-8 text-primary-500" />
+              <div>
+                <h1 className="text-xl font-bold">{t('appTitle')}</h1>
+                <p className="text-xs text-gray-600 dark:text-gray-400">{t('appDescription')}</p>
               </div>
-              <p className="mt-4 text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
-                {t('appDescription')}
-              </p>
             </div>
             <LanguageSwitcher />
           </div>
@@ -403,9 +478,6 @@ const App: React.FC = () => {
         <main>
           {renderContent()}
         </main>
-         <footer className="text-center mt-12 text-sm text-gray-500">
-            <p>{t('footerText', { year: new Date().getFullYear() })}</p>
-        </footer>
       </div>
     </div>
   );

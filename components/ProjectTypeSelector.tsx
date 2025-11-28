@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import { useTranslation } from '../hooks/useTranslation';
 import Card from './Card';
 import AgentConfig from './AgentConfig';
+import AuditHistory from './AuditHistory';
 import type { AuditConfig, ParsedN8nWorkflow, HistoricalAudit, ParsedCodeProject, CodeProjectAuditConfig } from '../types';
 import { deepAnalyzeProject } from '../services/deepProjectAnalyzer';
 import { isZipFile, processZipFile } from '../services/zipHandler';
@@ -35,6 +36,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
   const [codeProject, setCodeProject] = useState<ParsedCodeProject | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -127,118 +129,145 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
 
   // Mostrar selector inicial
   return (
-    <div className="max-w-4xl mx-auto">
-      <Card>
-        <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-4">
-            🤖 Silver Fleet - Auditor de Agentes IA
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            Elige el tipo de proyecto a auditar
-          </p>
+    <div className="max-w-[1200px] mx-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-4">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-bold">Tipo de Proyecto</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowHistory(true)}
+              className="px-3 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300"
+            >
+              📜 Historial
+            </button>
+            {onManageCredentials && (
+              <button
+                onClick={onManageCredentials}
+                className="px-3 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300"
+              >
+                🔐 Credenciales
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* n8n Option */}
-          <div
-            onClick={() => setSelectedType('n8n')}
-            className="p-8 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-primary-500 dark:hover:border-primary-400 cursor-pointer transition transform hover:scale-105 bg-gray-50 dark:bg-gray-900/50"
-          >
-            <div className="text-center">
-              <div className="text-6xl mb-4">🔄</div>
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
-                n8n Workflow
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Carga un archivo <code className="bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">workflow.json</code> de n8n
-              </p>
-              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-2 text-left mb-6">
-                <li>✅ Análisis de nodos IA</li>
-                <li>✅ Detección de herramientas</li>
-                <li>✅ Auditoría de conversaciones</li>
-                <li>✅ Verificación de BD</li>
-              </ul>
-              <button
-                onClick={() => setSelectedType('n8n')}
-                className="w-full px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium"
-              >
-                Seleccionar n8n
-              </button>
+          <div className="p-4 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-primary-500 hover:shadow-lg cursor-pointer transition-all duration-300 bg-gradient-to-br from-blue-50 to-primary-50 dark:from-gray-900 dark:to-primary-900/20 group">
+            <div className="flex items-start gap-3 mb-3">
+              <div className="text-4xl animate-spin-slow group-hover:scale-110 transition-transform">🔄</div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold mb-1 flex items-center gap-2">
+                  n8n Workflow
+                  <span className="text-xs bg-blue-500 text-white px-2 py-0.5 rounded-full">AI</span>
+                </h3>
+                <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                  Carga <code className="bg-gray-200 dark:bg-gray-800 px-1 rounded text-xs">workflow.json</code>
+                </p>
+                <div className="text-xs text-gray-600 dark:text-gray-400 space-y-0.5">
+                  <div>✅ Análisis de nodos IA</div>
+                  <div>✅ Auditoría de conversaciones</div>
+                  <div>✅ Verificación de BD</div>
+                </div>
+              </div>
             </div>
+            <button
+              onClick={() => setSelectedType('n8n')}
+              className="w-full px-3 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded-lg transition-colors font-semibold"
+            >
+              Seleccionar n8n →
+            </button>
           </div>
 
           {/* Node/TypeScript Option */}
-          <div className="p-8 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-green-500 dark:hover:border-green-400 cursor-pointer transition transform hover:scale-105 bg-gray-50 dark:bg-gray-900/50">
-            <div className="text-center">
-              <div className="text-6xl mb-4">💻</div>
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
-                Node/TypeScript
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Carga un archivo <code className="bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">.zip</code> de tu proyecto
-              </p>
-              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-2 text-left mb-6">
-                <li>✅ Detección de framework</li>
-                <li>✅ Identificación de agentes IA</li>
-                <li>✅ Mapeo de bases de datos</li>
-                <li>✅ APIs externas detectadas</li>
-              </ul>
-
-              {isAnalyzing ? (
-                <div className="w-full flex items-center justify-center gap-2 py-2">
-                  <Loader />
-                  <span className="text-sm text-gray-600 dark:text-gray-400">Analizando...</span>
+          <div className="p-4 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-green-500 hover:shadow-lg transition-all duration-300 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-gray-900 dark:to-green-900/20 group">
+            <div className="flex items-start gap-3">
+              <div className="text-4xl group-hover:scale-110 transition-transform">💻</div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold mb-1">Node/TypeScript</h3>
+                <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                  Carga <code className="bg-gray-200 dark:bg-gray-800 px-1 rounded text-xs">.zip</code> del proyecto
+                </p>
+                <div className="text-xs text-gray-600 dark:text-gray-400 space-y-0.5 mb-2">
+                  <div>✅ Detección de framework</div>
+                  <div>✅ Identificación de agentes</div>
+                  <div>✅ Mapeo de BD y APIs</div>
                 </div>
-              ) : (
-                <label className="w-full inline-block">
-                  <div className="w-full px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-medium cursor-pointer">
-                    {codeProject ? '✅ ZIP cargado - Haz click para cambiar' : 'Cargar ZIP'}
+
+                {isAnalyzing ? (
+                  <div className="flex items-center gap-2 py-1">
+                    <Loader />
+                    <span className="text-xs text-gray-600">Analizando...</span>
                   </div>
-                  <input
-                    type="file"
-                    accept=".zip"
-                    onChange={handleFileSelect}
-                    className="hidden"
-                  />
-                </label>
-              )}
+                ) : (
+                  <label className="block">
+                    <div className="px-3 py-1.5 bg-green-600 text-white text-sm rounded hover:bg-green-700 cursor-pointer text-center">
+                      {codeProject ? '✅ ZIP cargado' : 'Cargar ZIP'}
+                    </div>
+                    <input
+                      type="file"
+                      accept=".zip"
+                      onChange={handleFileSelect}
+                      className="hidden"
+                    />
+                  </label>
+                )}
+              </div>
             </div>
 
             {analysisError && (
-              <div className="mt-4 p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg text-sm">
+              <div className="mt-2 p-2 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded text-xs">
                 {analysisError}
               </div>
             )}
 
             {codeProject && (
-              <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg text-sm">
-                <p className="font-semibold text-green-900 dark:text-green-200 mb-2">
-                  ✅ Proyecto analizado:
+              <div className="mt-2 p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded text-xs">
+                <p className="font-semibold text-green-900 dark:text-green-200 mb-1">
+                  ✅ Proyecto analizado
                 </p>
-                <ul className="text-green-800 dark:text-green-300 space-y-1 text-xs">
-                  <li>• Framework: {codeProject.framework?.name || 'Desconocido'}</li>
-                  {codeProject.agents.length > 0 && (
-                    <li className="text-yellow-700 dark:text-yellow-400">
-                      • Agentes detectados: {codeProject.agents.length} 
-                      <span className="text-xs ml-2 italic">(sin auditoría completa en ZIP)</span>
-                    </li>
-                  )}
-                  <li>• Bases de datos: {codeProject.databases.length}</li>
-                  <li>• Herramientas: {codeProject.tools.length}</li>
-                  <li>• APIs: {codeProject.apis.length}</li>
-                  <li>• Archivos: {codeProject.fileCount}</li>
-                </ul>
+                <div className="text-green-800 dark:text-green-300 space-y-0.5 text-xs">
+                  <div>• Framework: {codeProject.framework?.name || 'Desconocido'}</div>
+                  <div>• Agentes: {codeProject.agents.length}</div>
+                  <div>• BD: {codeProject.databases.length} | APIs: {codeProject.apis.length}</div>
+                </div>
                 <button
                   onClick={() => setSelectedType('nodejs')}
-                  className="w-full mt-4 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 font-medium transition"
+                  className="w-full mt-2 px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700"
                 >
-                  Continuar con auditoría →
+                  Continuar →
                 </button>
               </div>
             )}
           </div>
         </div>
-      </Card>
+      </div>
+
+      {/* Modal de Historial */}
+      {showHistory && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full max-h-[85vh] flex flex-col animate-slideUp">
+            <div className="flex justify-between items-center p-5 border-b dark:border-gray-700 bg-gradient-to-r from-primary-50 to-blue-50 dark:from-gray-900 dark:to-primary-900/30">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <span className="text-2xl">📜</span>
+                Historial de Auditorías
+              </h2>
+              <button
+                onClick={() => setShowHistory(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-500 hover:text-red-600 text-2xl transition-colors"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              <AuditHistory onViewReport={(audit) => {
+                setShowHistory(false);
+                onViewHistory(audit);
+              }} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

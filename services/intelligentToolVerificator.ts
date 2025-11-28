@@ -40,6 +40,36 @@ export interface IntelligentVerificationResult {
 }
 
 /**
+ * Extrae TODOS los valores de un objeto (recursivamente) para comparación flexible
+ */
+function extractAllValues(obj: any, depth: number = 0): string[] {
+  if (depth > 3) return []; // Limitar profundidad para evitar loops
+  
+  const values: string[] = [];
+  
+  if (obj === null || obj === undefined) return values;
+  
+  // Si es un valor primitivo, agregarlo
+  if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') {
+    values.push(String(obj));
+    return values;
+  }
+  
+  // Si es un objeto o array, recorrer recursivamente
+  if (typeof obj === 'object') {
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        // Agregar valores anidados
+        const nestedValues = extractAllValues(obj[key], depth + 1);
+        values.push(...nestedValues);
+      }
+    }
+  }
+  
+  return values.filter(v => v && v.length > 0); // Filtrar vacíos
+}
+
+/**
  * Analiza la conversación completa y detecta discrepancias específicas
  */
 export async function verifyConversationIntelligently(
@@ -47,7 +77,8 @@ export async function verifyConversationIntelligently(
   conversationHistory: ExecutionStep[],
   databaseChanges: DatabaseChange[],
   databaseSnapshots: Map<number, any>,
-  language: string
+  language: string,
+  initialPayload?: Record<string, any>
 ): Promise<IntelligentVerificationResult> {
   
   console.log(`\n🧠 [Intelligent Verification] Analizando conversación: ${conversationId}`);
@@ -67,10 +98,52 @@ export async function verifyConversationIntelligently(
     return `[Cambio ${idx + 1}] ${change.type} en tabla "${change.table}":\n${recordStr}`;
   }).join('\n\n');
   
-  // 3. Construir prompt para Gemini AI
+  // 3. Extraer contexto del payload inicial (datos legítimos del webhook)
+  const payloadValues = initialPayload ? extractAllValues(initialPayload) : [];
+  
+  const payloadContext = initialPayload ? `
+🔥 PAYLOAD INICIAL DEL WEBHOOK - DATOS LEGÍTIMOS:
+
+**IMPORTANTE**: Este payload se envió en TODOS los turnos de la conversación (solo cambió el campo "body"/"message").
+Por lo tanto, TODOS los datos de este payload son VÁLIDOS en CUALQUIER turno.
+
+${JSON.stringify(initialPayload, null, 2)}
+
+📋 LISTA DE VALORES VÁLIDOS DEL PAYLOAD:
+${payloadValues.map(v => `- "${v}"`).join('\n')}
+
+⚠️ REGLA SIMPLE Y CLARA:
+
+✅ ES VÁLIDO (NO marcar error) si:
+1. El valor está en la lista de arriba (da igual el nombre del campo)
+2. Es una variación del payload (teléfono con/sin prefijo, mayúsculas, espacios)
+3. Usuario lo mencionó en la conversación
+4. Es dato técnico: ID numérico, timestamp, booleano, null
+5. Es campo de identificación: sessionId, conversationId, session_id, conversation_id, id_conversacion, from, phone, etc.
+
+❌ ES HARDCODED (marcar error) SOLO si:
+- Es nombre propio COMPLETO que NO está en payload NI conversación (ej: "Juan Pérez")
+- Es email COMPLETO que NO está en payload NI conversación (ej: "juan@test.com")
+- Es frase/texto inventado que NO vino del usuario
+
+🚫 IMPORTANTE - NO TE CONFUNDAS:
+- Si ves "5491112345678" en BD y está en la lista de arriba → VÁLIDO (este dato viene del payload que se envió en CADA turno)
+- Si ves "abc123" en BD y está en la lista de arriba → VÁLIDO (sessionId del payload, presente en CADA turno)
+- Si ves "15234" → VÁLIDO (es un ID)
+- Si ves "2024-11-26" → VÁLIDO (es timestamp)
+- Si ves "true" o "false" → VÁLIDO (es booleano)
+- Si es sessionId, conversationId, from, phone o similar → SIEMPRE VÁLIDO (identificadores del sistema que vienen del payload)
+
+🎯 RECORDATORIO CRÍTICO:
+El payload inicial no es "solo del primer turno" - se envía EN CADA REQUEST al webhook.
+La única diferencia entre turnos es el mensaje del usuario (campo "body" o "message").
+Por lo tanto, si un valor está en el payload inicial, es VÁLIDO encontrarlo en BD en CUALQUIER momento.
+` : '';
+  
+  // 4. Construir prompt para Gemini AI
   const prompt = `
 Eres un auditor experto de sistemas de IA conversacional. Tu trabajo es analizar una conversación completa entre un usuario y un bot, junto con los cambios que se hicieron en la base de datos, para detectar DISCREPANCIAS ESPECÍFICAS.
-
+${payloadContext}
 # CONVERSACIÓN COMPLETA:
 ${conversationContext}
 
@@ -83,7 +156,10 @@ Analiza minuciosamente y detecta TODAS las discrepancias específicas entre lo q
 ## 1. PRECIOS DE PRODUCTOS
 - ¿El bot mencionó precios de productos?
 - ¿Los precios mencionados coinciden con los datos guardados en BD?
-- ¿Hay sobrevaluación o subvaluación?
+- ⚠️ IMPORTANTE: Si los precios vienen del PAYLOAD INICIAL o de herramientas de cálculo, son VÁLIDOS
+- ❌ SOLO marca como problema si el precio es INCORRECTO o INCONSISTENTE entre lo que dijo el bot y lo que guardó
+- ✅ Ejemplo válido: Bot dice "$500" y BD tiene "500" → OK, no es discrepancia
+- ❌ Ejemplo inválido: Bot dice "$500" pero BD tiene "450" → price_mismatch
 
 ## 2. EMAILS
 - ¿El bot prometió enviar un email?
@@ -92,16 +168,28 @@ Analiza minuciosamente y detecta TODAS las discrepancias específicas entre lo q
 - ¿El destinatario en BD coincide con el prometido?
 - ¿El asunto/contenido es coherente con lo prometido?
 
-## 3. DATOS GUARDADOS
-- ¿Los datos guardados en BD son coherentes con lo que el usuario dijo?
-- Ej: Si el usuario dijo "me llamo Juan", ¿se guardó "Juan" o algo distinto?
-- ¿Hay campos con valores incorrectos, vacíos o contradictorios?
-- **CRÍTICO - DATOS HARDCODEADOS**: ¿Se guardaron datos que NUNCA fueron mencionados en la conversación?
-  * Ej: Si se guardó un email pero el usuario NUNCA lo mencionó → discrepancia crítica
-  * Ej: Si se guardó un teléfono pero el usuario NUNCA lo dio → discrepancia crítica
-  * Ej: Si se guardó un nombre específico pero el bot nunca lo preguntó → discrepancia crítica
-  * Estos son datos HARDCODEADOS en el flujo que NO provienen de la conversación real
-  * SIEMPRE es un error grave: el bot debe recolectar datos, no inventarlos
+## 3. DATOS GUARDADOS EN BASE DE DATOS
+
+🔥 REGLA DE ORO: Usa la "LISTA DE VALORES VÁLIDOS DEL PAYLOAD" de arriba.
+
+**Proceso simple para validar cada dato en BD:**
+
+1️⃣ ¿El valor está en la lista de "VALORES VÁLIDOS DEL PAYLOAD"? → ✅ VÁLIDO (no importa el nombre del campo)
+2️⃣ ¿Es variación del payload? (teléfono +54/549, mayúsculas, espacios) → ✅ VÁLIDO
+3️⃣ ¿Es dato técnico? (ID: 123, fecha: 2024-11-26, bool: true/false, null) → ✅ VÁLIDO
+4️⃣ ¿Es identificador de sesión? (sessionId, conversationId, session_id, id_sesion, etc.) → ✅ SIEMPRE VÁLIDO
+5️⃣ ¿Usuario lo mencionó? (Usuario: "soy Juan" → BD: "Juan") → ✅ VÁLIDO
+6️⃣ Si NO cumple 1-5 Y es nombre completo/email/frase específica → ❌ HARDCODED
+
+**Ejemplos:**
+- BD: telefono: "5491112345678" | Payload tiene "5491112345678" → ✅ VÁLIDO
+- BD: session_id: "abc123" | Payload tiene "abc123" → ✅ VÁLIDO  
+- BD: conversationId: "xyz789" → ✅ SIEMPRE VÁLIDO (identificador de sistema)
+- BD: id: 15234 → ✅ VÁLIDO (ID numérico autogenerado)
+- BD: created_at: "2024-11-26" → ✅ VÁLIDO (timestamp)
+- BD: nombre: "Juan" | Usuario dijo "me llamo Juan" → ✅ VÁLIDO
+- BD: nombre: "Pedro González" | NO en payload, NO en conversación → ❌ HARDCODED
+- BD: email: "pedro@test.com" | NO en payload, NO en conversación → ❌ HARDCODED
 
 ## 4. ESTADOS Y BLOQUEOS
 - ¿El bot mencionó bloquear/desbloquear al usuario?
@@ -132,13 +220,27 @@ Devuelve un JSON con el siguiente formato:
   "detailedReport": "Reporte detallado en formato markdown con todas las observaciones"
 }
 
-IMPORTANTE:
-- Si NO encuentras discrepancias, devuelve array vacío en "discrepancies"
-- Sé ESPECÍFICO: no digas "error en datos", di "guardó nombre 'Pedro' cuando usuario dijo 'Juan'"
-- **USA type="hardcoded_data"** cuando encuentres datos en BD que NUNCA fueron mencionados en la conversación
-- Incluye números, valores exactos, y citas textuales
-- Severity: "critical" = falla que rompe funcionalidad (incluye hardcoded_data), "high" = error grave pero no crítico, "medium" = problema menor, "low" = sugerencia
-- overallScore: 10 = perfecto, 8-9 = muy bien con detalles menores, 6-7 = bien pero con errores, 4-5 = regular con problemas, 0-3 = mal desempeño
+🎯 CRITERIOS DE VALIDACIÓN:
+
+1. Si NO hay discrepancias REALES → devuelve array vacío
+2. Sé ESPECÍFICO: di exactamente qué valor esperabas vs cuál ocurrió
+3. Para "hardcoded_data" - SOLO marca si estás 100% seguro que:
+   - NO está en "VALORES LEGÍTIMOS DEL PAYLOAD" (revisa la lista completa)
+   - NO es normalización (teléfono con/sin +, mayúsculas, espacios)
+   - NO es dato técnico (ID, timestamp, booleano, null)
+   - NO lo mencionó el usuario
+   - Y ES nombre propio completo / email completo / frase inventada
+
+4. CUANDO DUDES → marca como VÁLIDO (mejor falso negativo que falso positivo)
+5. Incluye valores exactos y citas textuales en evidencia
+
+📊 Severity:
+- "critical" = solo hardcoded_data REAL (dato completamente inventado)
+- "high" = error grave (precio incorrecto, email no enviado)
+- "medium" = problema menor (inconsistencia leve)
+- "low" = sugerencia de mejora
+
+overallScore: 10=perfecto, 8-9=muy bien, 6-7=bien con errores, 4-5=regular, 0-3=mal
 
 ${language === 'es' ? 'RESPONDE EN ESPAÑOL' : 'RESPOND IN ENGLISH'}
 `;

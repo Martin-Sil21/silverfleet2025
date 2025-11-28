@@ -5,6 +5,7 @@ import Card from './Card';
 import { useTranslation } from '../hooks/useTranslation';
 import DashboardReport from './DashboardReport';
 import { generateDiscrepanciesReport } from '../services/intelligentToolVerificator';
+import LiveVerificationPanel from './LiveVerificationPanel';
 
 interface AuditReportProps {
   results: AuditResult[];
@@ -149,7 +150,7 @@ const CriterionBreakdown: React.FC<{ analysis: CriterionAnalysis[] }> = ({ analy
 
 
 // 🔥 Tab system for detailed view
-type ReportTabType = 'summary' | 'database' | 'verification' | 'conversation';
+type ReportTabType = 'summary' | 'database' | 'verification' | 'conversation' | 'verifications';
 
 const ReportTabButton: React.FC<{ 
   active: boolean; 
@@ -259,6 +260,12 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
                 onClick={() => setActiveTab('verification')}
               />
             )}
+            <ReportTabButton 
+              active={activeTab === 'verifications'} 
+              icon="🔍" 
+              label="Verificaciones Live"
+              onClick={() => setActiveTab('verifications')}
+            />
             <ReportTabButton 
               active={activeTab === 'conversation'} 
               icon="💬" 
@@ -1045,6 +1052,26 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
           )}
           
           {/* ============================================ */}
+          {/* ============================================ */}
+          {/* 🔍 TAB: VERIFICACIONES LIVE */}
+          {/* ============================================ */}
+          {activeTab === 'verifications' && (
+            <section className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-5 border-2 border-purple-300 dark:border-purple-700">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-3xl">🔍</span>
+                <h3 className="text-2xl font-bold text-purple-900 dark:text-purple-100">
+                  Verificaciones en Tiempo Real
+                </h3>
+              </div>
+              
+              <LiveVerificationPanel 
+                steps={result.executionTrace} 
+                isActive={false}
+              />
+            </section>
+          )}
+
+          {/* ============================================ */}
           {/* 💬 TAB: CONVERSACIÓN */}
           {/* ============================================ */}
           {activeTab === 'conversation' && (
@@ -1246,7 +1273,8 @@ const ReportCard: React.FC<{ result: AuditResult; config: AuditConfig }> = ({ re
 
 const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config, isHistoryView = false }) => {
   const { t } = useTranslation();
-  const [activeView, setActiveView] = useState<'dashboard' | 'detailed'>('dashboard');
+  const [activeView, setActiveView] = useState<'dashboard' | 'conversations' | 'detailed'>('dashboard');
+  const [selectedConversationIndex, setSelectedConversationIndex] = useState(0);
   
   const overallAverageScore = useMemo(() => {
     if (results.length === 0) return 0;
@@ -1406,6 +1434,16 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config, isH
                     📊 Dashboard
                   </button>
                   <button
+                    onClick={() => setActiveView('conversations')}
+                    className={`px-6 py-3 font-semibold transition-all ${
+                      activeView === 'conversations'
+                        ? 'border-b-4 border-blue-500 text-blue-600 dark:text-blue-400 -mb-0.5'
+                        : 'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    💬 Conversaciones ({results.length})
+                  </button>
+                  <button
                     onClick={() => setActiveView('detailed')}
                     className={`px-6 py-3 font-semibold transition-all ${
                       activeView === 'detailed'
@@ -1413,7 +1451,7 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config, isH
                         : 'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
                     }`}
                   >
-                    📝 Reporte Detallado
+                    📝 Reporte Completo
                   </button>
                 </div>
             </div>
@@ -1422,6 +1460,52 @@ const AuditReport: React.FC<AuditReportProps> = ({ results, onReset, config, isH
         {/* 🔥 Vista de Dashboard */}
         {activeView === 'dashboard' && (
           <DashboardReport results={results} config={config} />
+        )}
+
+        {/* 🔥 NUEVA: Vista de Conversaciones Individuales */}
+        {activeView === 'conversations' && (
+          <div>
+            {/* Navegador de conversaciones */}
+            <Card className="mb-6">
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">
+                Selecciona una Conversación
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {results.map((result, index) => {
+                  const scoreColor = result.analysis.overallScore >= 8 
+                    ? 'bg-green-100 border-green-400 text-green-800 dark:bg-green-900/30 dark:border-green-600 dark:text-green-300'
+                    : result.analysis.overallScore >= 5
+                    ? 'bg-yellow-100 border-yellow-400 text-yellow-800 dark:bg-yellow-900/30 dark:border-yellow-600 dark:text-yellow-300'
+                    : 'bg-red-100 border-red-400 text-red-800 dark:bg-red-900/30 dark:border-red-600 dark:text-red-300';
+                  
+                  const isActive = selectedConversationIndex === index;
+                  
+                  return (
+                    <button
+                      key={result.id}
+                      onClick={() => setSelectedConversationIndex(index)}
+                      className={`px-4 py-3 rounded-lg border-2 transition-all font-medium ${
+                        isActive
+                          ? 'ring-4 ring-blue-300 dark:ring-blue-700 scale-105'
+                          : 'hover:scale-102'
+                      } ${scoreColor}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl font-bold">{result.analysis.overallScore.toFixed(1)}</span>
+                        <div className="text-left">
+                          <div className="text-sm font-semibold">{result.testCase.persona}</div>
+                          <div className="text-xs opacity-75">{result.executionTrace.length} turnos</div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </Card>
+            
+            {/* Detalle de la conversación seleccionada */}
+            <ResultCard result={results[selectedConversationIndex]} config={config} />
+          </div>
         )}
 
         {/* 🔥 Vista Detallada (contenido original) */}

@@ -19,7 +19,7 @@ const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 export type ProgressCallback = (update: { message: string; trace?: AuditResult, testCaseId?: string, step?: ExecutionStep }) => void;
 type ResultCallback = (result: AuditResult) => void;
-type CompletionCallback = () => void;
+type CompletionCallback = (allResults: AuditResult[]) => void;
 
 const MAX_CONVERSATION_TURNS = 12;
 
@@ -111,7 +111,45 @@ export const generateTestCases = async (
     onBatchGenerated?: (batch: TestCase[]) => void // 🔥 NUEVO: Callback para cada lote
 ): Promise<TestCase[]> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const { workflow, criteria, testCaseCount, connections, samplePayload, codeProject } = config;
+    const { workflow, criteria, testCaseCount, connections, samplePayload, codeProject, realDatabaseConfig } = config;
+
+    // 🔥 NUEVO: Consultar teléfonos existentes en BD si está configurada
+    let existingPhones: string[] = [];
+    if (realDatabaseConfig && realDatabaseConfig.url && realDatabaseConfig.key) {
+        try {
+            console.log('📞 [TestCases] Verificando teléfonos existentes en BD...');
+            const { createClient } = await import('@supabase/supabase-js');
+            const supabase = createClient(realDatabaseConfig.url, realDatabaseConfig.key);
+            
+            // Buscar campos de teléfono en todas las tablas configuradas
+            const phoneFields = ['phone', 'telefono', 'tel', 'mobile', 'celular', 'numero', 'number', 'from'];
+            
+            for (const table of realDatabaseConfig.tables) {
+                for (const field of phoneFields) {
+                    try {
+                        const { data, error } = await supabase
+                            .from(table)
+                            .select(field)
+                            .not(field, 'is', null);
+                        
+                        if (!error && data && data.length > 0) {
+                            const phones = data.map(row => String(row[field])).filter(p => p && p.length > 0);
+                            existingPhones.push(...phones);
+                            console.log(`   ✅ Tabla "${table}".${field}: ${phones.length} teléfonos encontrados`);
+                        }
+                    } catch (e) {
+                        // Silently skip if field doesn't exist
+                    }
+                }
+            }
+            
+            // Deduplicar
+            existingPhones = [...new Set(existingPhones)];
+            console.log(`📞 [TestCases] Total teléfonos únicos en BD: ${existingPhones.length}`);
+        } catch (error) {
+            console.warn('⚠️ [TestCases] No se pudo verificar teléfonos en BD:', error);
+        }
+    }
 
     // 🔥 NUEVO: Generar lotes EN PARALELO para máxima velocidad
     const BATCH_SIZE = 20;
@@ -156,6 +194,18 @@ export const generateTestCases = async (
         Audit criteria (what you're testing):
         ${criteria.map((c, i) => `${i+1}. ${c}`).join('\n')}
 
+        ${existingPhones.length > 0 ? `
+        ⚠️ CRITICAL - PHONE NUMBER RESTRICTIONS:
+        The following phone numbers ALREADY EXIST in the production database and MUST NOT be used:
+        ${existingPhones.slice(0, 100).join(', ')}${existingPhones.length > 100 ? ` ... and ${existingPhones.length - 100} more` : ''}
+        
+        When generating phone numbers for test cases:
+        - Generate COMPLETELY NEW phone numbers that are NOT in the list above
+        - Use realistic formats (e.g., +54911XXXXXXXX for Argentina, +1XXX-XXX-XXXX for USA)
+        - Ensure each generated phone is unique and does not conflict with existing data
+        - NEVER reuse a phone number from the restriction list
+        ` : ''}
+
         Based on your analysis, for each of the ${batchSize} test cases, you must:
         1.  Create a complete JSON payload (\`initialPayload\`) that follows the sample structure with **completely new and unique data**.
         2.  Define a user 'persona' that describes the user's personality and communication style.
@@ -168,6 +218,7 @@ export const generateTestCases = async (
         - Personas must be VARIED (different ages, personalities, needs, communication styles).
         - Each goal should test one or more of the audit criteria.
         - Ensure the number of generated personas matches exactly ${batchSize}.
+        ${existingPhones.length > 0 ? '- IMPORTANT: Do NOT use any phone numbers from the restriction list above!' : ''}
 
         Return the result as a JSON array of objects. The entire response must be only the JSON array, with no explanations or markdown formatting.
         ${getLanguageInstruction(language)}
@@ -364,16 +415,49 @@ export const findAgentMessageText = (data: any): string => {
     if (typeof data.response === 'string') return data.response;
     if (typeof data.output === 'string') return data.output;
     if (typeof data.message === 'string') return data.message;
+    if (typeof data.text === 'string') return data.text;
+    
+    // 🔥 DETECTAR SI ES EL PAYLOAD CRUDO (webhook devolvió el request en lugar de respuesta)
+    // Indicadores: tiene session_id/from pero NO tiene response/message/output
+    const isRawPayload = (data.session_id || data.from || data.pushName) && 
+                         !data.response && !data.message && !data.output && !data.text;
+    
+    if (isRawPayload) {
+        console.warn('⚠️ ALERTA: Webhook devolvió payload crudo en lugar de respuesta procesada');
+        // Intentar extraer el body si existe (podría ser eco del mensaje del usuario)
+        if (data.body) {
+            return `[ECHO: ${data.body}]`; // Marcar que es eco
+        }
+        return "(Webhook error: returned raw payload instead of response)";
+    }
     
     // Handle nested, multi-part responses like { "response": { "parte1": "...", "parte2": "..." } }
     if (typeof data.response === 'object' && data.response !== null) {
-        return Object.values(data.response).filter(v => typeof v === 'string').join(' ');
-    }
-    if (typeof data.output === 'object' && data.output !== null) {
-       return JSON.stringify(data.output); // fallback
+        const parts = Object.values(data.response).filter(v => typeof v === 'string');
+        if (parts.length > 0) return parts.join(' ');
     }
     
-    return JSON.stringify(data); // final fallback
+    // Handle messages array (BuilderBot format)
+    if (Array.isArray(data.messages) && data.messages.length > 0) {
+        const firstMessage = data.messages[0];
+        if (typeof firstMessage === 'string') return firstMessage;
+        if (firstMessage.body) return firstMessage.body;
+        if (firstMessage.text) return firstMessage.text;
+    }
+    
+    // Si tiene output como objeto, intentar extraer mensaje
+    if (typeof data.output === 'object' && data.output !== null) {
+        if (data.output.message) return data.output.message;
+        if (data.output.text) return data.output.text;
+        if (data.output.response) return data.output.response;
+    }
+    
+    // Último recurso: JSON stringify pero truncado
+    const jsonStr = JSON.stringify(data);
+    if (jsonStr.length > 200) {
+        return `(Complex response: ${jsonStr.substring(0, 200)}...)`;
+    }
+    return jsonStr;
 }
 
 export const generateUserMessageText = async (
@@ -422,13 +506,13 @@ export const generateUserMessageText = async (
     Your Persona: "${testCase.persona}"
     Your Ultimate Goal: "${testCase.conversationGoal}"
     
-    ${databaseContext ? `\n=== IMPORTANT CONTEXT FROM DATABASE ===\n${databaseContext}\n\nUse this context to make your conversation more realistic. For example:\n- If you're blocked, you might express frustration or ask why\n- If a price was quoted, you can reference it or negotiate\n- If a deposit was confirmed, you can ask about next steps\n=== END DATABASE CONTEXT ===\n` : ''}
+    ${databaseContext ? `\n=== IMPORTANT CONTEXT FROM DATABASE ===\n${databaseContext}\n\n🚫 CRITICAL - CHECK FOR BLOCKING:\n- If the database shows you are BLOCKED (is_blocked = true, is_bloqued = true, blocked = true, etc.)\n- And the agent told you to write "ASISTENTE" or similar keyword to reach a human\n- You MUST write EXACTLY that keyword and NOTHING ELSE\n- DO NOT continue the conversation if you're blocked\n- DO NOT ignore the blocking instruction\n- RESPECT the agent's blocking mechanism\n\nUse this context to make your conversation more realistic. For example:\n- If you're blocked, you might express frustration or ask why\n- If a price was quoted, you can reference it or negotiate\n- If a deposit was confirmed, you can ask about next steps\n=== END DATABASE CONTEXT ===\n` : ''}
     
     ${toolsContext ? `\n=== AVAILABLE EXTERNAL TOOLS ===\n${toolsContext}\n\nThe agent can use these tools, so you can naturally:\n- Ask for a quote to be sent by email\n- Request a meeting to be scheduled\n- Expect proposals/documents to be emailed\n=== END TOOLS CONTEXT ===\n` : ''}
     
     ${historyString ? `Full Conversation History:\n${historyString}` : "(This is the first message of the conversation.)"}
     
-    ${lastAgentResponse ? `\nThe agent just said: "${lastAgentResponse}"\nYou MUST respond directly to what the agent just said.` : ''}
+    ${lastAgentResponse ? `\nThe agent just said: "${lastAgentResponse}"\nYou MUST respond directly to what the agent just said.\n\n🚫 BLOCKING CHECK:\n- If the agent mentioned ANY blocking, restriction, or "write ASISTENTE/ASESOR/keyword"\n- You MUST write EXACTLY that keyword (e.g., "ASISTENTE" or "ASESOR")\n- DO NOT add anything else, just the keyword\n- DO NOT continue asking questions if the agent asked you to write a keyword\n- RESPECT the agent's instructions about keywords for human assistance` : ''}
     
     Your Task: Generate your *next* message that:
     1. RESPONDS SPECIFICALLY to the agent's last message (don't repeat yourself)
@@ -450,11 +534,20 @@ export const generateUserMessageText = async (
     - NEVER repeat what you've already said. Generate UNIQUE messages each time.
     - Your response should be ONLY the message text, nothing else. No JSON, no labels, no quotes.
     
+    🚫 CRITICAL BLOCKING RULE:
+    - If the agent says "escribe ASISTENTE", "escribe ASESOR", "write [keyword]", or mentions any keyword to contact a human
+    - You MUST respond with ONLY that exact keyword (e.g., just "ASISTENTE" or "ASESOR")
+    - DO NOT add explanations, questions, or continue the conversation
+    - DO NOT ignore this instruction - it's how the system works
+    - After writing the keyword, the conversation should transfer to a human
+    
     Examples of good short messages:
     - "Ah perfecto, gracias! Y cuánto sería el precio entonces?"
     - "Ok, entiendo. Pero me sirve para 18m²?"
     - "Genial! Y cómo hago para comprar?"
     - "Dale, eso me re sirve. Y de cuánto es el plazo de entrega?"
+    - "ASISTENTE" (if the agent told you to write this keyword)
+    - "ASESOR" (if the agent told you to write this keyword)
     
     ${getLanguageInstruction(language)}
     `;
@@ -700,18 +793,29 @@ const analyzeResult = async (
        - 'justification': Detailed explanation WITH NUMBERS
        - 'evidence': Array of specific evidence points
        - 'impact': 'high' | 'medium' | 'low' (how critical is this criterion?)
+       - 'recommendation': MANDATORY for scores < 7 - Specific, actionable fix for this criterion (e.g., "Modify system prompt line 45 to: 'Always ask for user confirmation before sending emails'")
        
-    4. **RISK ASSESSMENT** ('riskAssessment'):
+    4. **PRICE ANALYSIS** ('priceAnalysis' object):
+       Extract and verify ALL prices mentioned in:
+       - 'mentioned': Prices mentioned in agent responses (e.g., agent said "$500")
+       - 'inDB': Prices found in database records/changes
+       - 'inPrompt': Prices hardcoded in system prompts/instructions
+       - 'consistent': true if all sources show same prices, false if discrepancies exist
+       - 'discrepancies': Array of specific problems (e.g., ["Agent said $500 but DB shows $450", "Prompt has $600 but agent said $500"])
+       
+       IMPORTANT: If NO prices were mentioned anywhere, return null for priceAnalysis.
+       
+    5. **RISK ASSESSMENT** ('riskAssessment'):
        - 'high': Critical issues found (wrong data, failed tools, security concerns)
        - 'medium': Multiple warnings, goal partially achieved
        - 'low': Minor issues only, goal fully achieved
        
-    5. **RECOMMENDATIONS** ('recommendations' array):
+    6. **RECOMMENDATIONS** ('recommendations' array):
        - 3-5 ACTIONABLE recommendations
        - Each must be specific and implementable
        - Prioritize by impact
        
-    6. **GOAL ACHIEVEMENT** ('goalAchieved'):
+    7. **GOAL ACHIEVEMENT** ('goalAchieved'):
        - true: Persona's goal was fully met
        - false: Goal not achieved or only partially met
 
@@ -756,15 +860,19 @@ const analyzeResult = async (
     - Goal achieved but with workarounds or extra user effort
     
     MINOR PROBLEMS (−0.3 to −0.7 points each):
-    - Hardcoded data from payload (e.g., name, phone) instead of asking - THIS IS VERY MINOR
     - Suboptimal conversation flow (but still functional)
     - Missing optional validations
     - Cosmetic issues (formatting, typos)
     
-    NON-PROBLEMS (0 points):
-    - Using payload data that was provided in the initial context (expected behavior)
+    ⚠️ NON-PROBLEMS (0 points - DO NOT PENALIZE):
+    - **Using payload data (name, phone, sessionId) that was provided in initial webhook call** - THIS IS CORRECT AND EXPECTED
     - Storing session info in database (normal operation)
-    - Not asking for info that was already provided
+    - Not asking for info that was already provided in the payload
+    - Using customer context from initial request (this is smart behavior, not a problem)
+    
+    🚫 CRITICAL: DO NOT PENALIZE FOR USING PAYLOAD DATA
+    If the initial webhook/request includes customer data (name, phone, etc.), the agent SHOULD use it.
+    Only penalize if the agent uses WRONG data or IGNORES data that should be used.
     
     FINAL SCORE RANGES:
     - 9.0-10.0: Exceptional - Goal achieved, no real issues
@@ -774,9 +882,13 @@ const analyzeResult = async (
     - 0.0-3.9: Critical failure - Security issues, data corruption, complete failure
     
     🧠 EXAMPLE SCORING:
-    Scenario: Bot used customer name from payload instead of asking
-    Impact: Conversation worked fine, customer got help
-    Score reduction: −0.5 (minor) → Final score: 9.5/10
+    Scenario: Bot used customer name "Juan Pérez" from payload (webhook included: {name: "Juan Pérez", phone: "+54911..."})
+    Impact: Conversation worked perfectly, customer got personalized help
+    Score reduction: 0 (this is CORRECT behavior) → Final score: 10/10
+    
+    Scenario: Bot used WRONG name or ignored payload data when it was available
+    Impact: Customer received impersonal or incorrect treatment
+    Score reduction: −1.5 (data misuse) → Final score: 8.5/10
     
     Scenario: Bot said "I sent email" but didn't actually send it
     Impact: Customer expects confirmation, didn't get it
@@ -851,9 +963,57 @@ const analyzeResult = async (
                                     type: Type.STRING,
                                     enum: ['high', 'medium', 'low']
                                 },
+                                recommendation: { type: Type.STRING }, // Recomendación específica para este criterio
                             },
                             required: ['criterion', 'score', 'justification'],
                         },
+                    },
+                    priceAnalysis: {
+                        type: Type.OBJECT,
+                        properties: {
+                            mentioned: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        source: { type: Type.STRING },
+                                        value: { type: Type.NUMBER },
+                                        context: { type: Type.STRING },
+                                    },
+                                    required: ['source', 'value', 'context'],
+                                },
+                            },
+                            inDB: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        source: { type: Type.STRING },
+                                        value: { type: Type.NUMBER },
+                                        context: { type: Type.STRING },
+                                    },
+                                    required: ['source', 'value', 'context'],
+                                },
+                            },
+                            inPrompt: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        source: { type: Type.STRING },
+                                        value: { type: Type.NUMBER },
+                                        context: { type: Type.STRING },
+                                    },
+                                    required: ['source', 'value', 'context'],
+                                },
+                            },
+                            consistent: { type: Type.BOOLEAN },
+                            discrepancies: {
+                                type: Type.ARRAY,
+                                items: { type: Type.STRING },
+                            },
+                        },
+                        required: ['consistent'],
                     },
                 },
                 required: ['overallScore', 'summary', 'criteriaBreakdown', 'goalAchieved', 'riskAssessment'],
@@ -1278,6 +1438,9 @@ export const runFullAudit = async (
         onProgress({ message: "\n━━━━━━━━━━━━━━━━━━━━━━" });
         onProgress({ message: "📊 Todas las rondas completadas. Analizando resultados finales..." });
 
+        // 🔥 CRÍTICO: Acumular TODOS los resultados aquí para pasarlos completos a handleAllComplete
+        const allCompletedResults: AuditResult[] = [];
+
         const analysisPromises = conversations.map(async conv => {
             try {
                 onProgress({ message: `🔍 Analizando resultado final: "${conv.testCase.title}"...` });
@@ -1301,7 +1464,8 @@ export const runFullAudit = async (
                                 conv.history,
                                 databaseActivity.changes || [],
                                 auditor.snapshots,
-                                language
+                                language,
+                                conv.testCase.initialPayload // 🔥 Pasar el payload ESPECÍFICO de este test case
                             );
                             
                             onProgress({ message: `   ✅ Verificación completada - Score: ${intelligentVerification.overallScore.toFixed(1)}/10, Discrepancias: ${intelligentVerification.discrepancies.length}` });
@@ -1342,6 +1506,10 @@ export const runFullAudit = async (
                     durationMs,
                     toolVerifications: conv.toolVerifications // 🔧 NUEVO: Agregar verificaciones de herramientas
                 };
+                
+                // 🔥 CRÍTICO: Guardar en array local para pasar todos juntos al final
+                allCompletedResults.push(result);
+                
                 onResultComplete(result);
                 onProgress({ message: `✅ Análisis completo para "${conv.testCase.title}" - Score: ${analysis.overallScore.toFixed(1)}/10` });
             } catch (error) {
@@ -1369,11 +1537,20 @@ export const runFullAudit = async (
                     endTime: conv.endTime,
                     durationMs: (conv.endTime && conv.startTime) ? (conv.endTime - conv.startTime) : undefined,
                 };
+                
+                // 🔥 CRÍTICO: Guardar también los errores en el array local
+                allCompletedResults.push(errorResult);
+                
                 onResultComplete(errorResult);
             }
         });
 
         await Promise.all(analysisPromises);
+        
+        console.log(`📊 [CRITICAL] Análisis completado. Total de resultados acumulados: ${allCompletedResults.length}`);
+        allCompletedResults.forEach((r, i) => {
+            console.log(`   ${i + 1}. "${r.testCase.title}" - Score: ${r.analysis?.overallScore.toFixed(1) || 'N/A'}`);
+        });
         
         // 🧹 Limpiar auditores de BD
         if (config.realDatabaseConfig && config.realDatabaseConfig.url) {
@@ -1433,8 +1610,12 @@ export const runFullAudit = async (
         // =======================================
         
         onProgress({ message: "\n🏁 AUDITORÍA COMPLETA - Todos los resultados procesados." });
-        console.log('🔥🔥🔥 Llamando a onAllComplete() para cambiar estado a REPORT_READY...');
-        onAllComplete();
+        
+        console.log('🔥🔥🔥 Llamando a onAllComplete() con resultados completos...');
+        console.log('📊 Total de resultados a pasar:', allCompletedResults.length);
+        console.log('📊 Resultados:', allCompletedResults.map(r => `${r.testCase.title} (${r.analysis?.overallScore.toFixed(1)})`).join(', '));
+        
+        onAllComplete(allCompletedResults);
         console.log('✅✅✅ onAllComplete() ejecutado - El reporte debería mostrarse ahora.');
 
     }

@@ -10,7 +10,7 @@
 export async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs: number = 30000 // 30 segundos por defecto
+  timeoutMs: number = 120000 // 120 segundos (2 minutos) por defecto - Aumentado para agentes lentos
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

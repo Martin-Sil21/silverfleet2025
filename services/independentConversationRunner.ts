@@ -11,7 +11,7 @@ import { getRealDatabaseAuditor } from './realDatabaseAuditor';
 import { costTracker } from './costTracker';
 
 const MAX_CONVERSATION_TURNS = 12;
-const WEBHOOK_TIMEOUT_MS = 60000; // 60 segundos por llamada al webhook (algunos agentes son lentos)
+const WEBHOOK_TIMEOUT_MS = 120000; // 120 segundos (2 minutos) por llamada al webhook - Aumentado para agentes lentos o con muchas herramientas
 
 /**
  * Ejecuta una conversación de manera independiente (para ejecución paralela)
@@ -216,8 +216,36 @@ export async function runConversationIndependently(
                     };
                 }
                 
+                // 🔥 CRÍTICO: Verificar si respuesta está vacía porque el usuario está bloqueado
+                const agentMessageText = findAgentMessageText(agentResponse);
+                const isEmptyResponse = !agentMessageText || agentMessageText.trim().length === 0;
+                
+                if (isEmptyResponse && auditor) {
+                    console.log(`   ⚠️ Respuesta vacía detectada - Verificando si es por bloqueo en BD...`);
+                    try {
+                        const userId = webhookPayload.session_id || webhookPayload.from || conv.testCase.id;
+                        const isNotBlocked = await auditor.verifyNotBlocked(userId, `After Turn ${turnNumber}`);
+                        
+                        if (!isNotBlocked) {
+                            console.log(`   ✅ Respuesta vacía confirmada: Usuario está BLOQUEADO en BD (comportamiento correcto)`);
+                            agentResponse = {
+                                blocked: true,
+                                reason: 'Usuario bloqueado en base de datos',
+                                message: '',
+                                text: '',
+                                isEmpty: true,
+                                isBlocked: true
+                            };
+                        } else {
+                            console.log(`   ❌ Respuesta vacía pero usuario NO está bloqueado - Error real del agente`);
+                        }
+                    } catch (blockCheckError) {
+                        console.warn(`   ⚠️ No se pudo verificar bloqueo en BD:`, blockCheckError);
+                    }
+                }
+                
                 console.log(`   ✅ Respuesta del webhook recibida`);
-                console.log(`   🤖 Agente: "${findAgentMessageText(agentResponse)}"`);
+                console.log(`   🤖 Agente: "${agentMessageText}"`);
                 
             } catch (webhookErr: any) {
                 webhookError = true;
@@ -312,12 +340,18 @@ export async function runConversationIndependently(
             }
             
             // ========== 9. GUARDAR EN HISTORY ==========
+            // 🔥 Si la respuesta está vacía por bloqueo, NO es un error
+            const isBlockedResponse = agentResponse?.isBlocked === true;
+            const actualStatus = webhookError && !isBlockedResponse ? 'ERROR' : 'SUCCESS';
+            
             const executionStep: ExecutionStep = {
                 nodeId: `Turn ${turnNumber}`,
-                status: webhookError ? 'ERROR' : 'SUCCESS',
-                input: { message: userMessage, ...webhookPayload },
+                status: actualStatus,
+                input: { ...webhookPayload, message: userMessage }, // ✅ CRÍTICO: message debe sobrescribir, no ser sobrescrito
                 output: agentResponse,
-                log: webhookError 
+                log: isBlockedResponse
+                    ? `Usuario bloqueado - Respuesta vacía esperada (correcto)`
+                    : webhookError 
                     ? `Error: ${agentResponse.error || 'Unknown error'}`
                     : `Turno ${turnNumber} completado exitosamente`,
                 durationMs: turnDuration,
@@ -327,8 +361,14 @@ export async function runConversationIndependently(
             conv.history.push(executionStep);
             
             // ========== 10. ACTUALIZAR UI CON RESULTADO DEL TURNO ==========
+            // 🔥 Reutilizar isBlockedResponse ya declarado arriba
+            const displayStatus = isBlockedResponse ? '🚫' : webhookError ? '❌' : '✅';
+            const displayMessage = isBlockedResponse 
+                ? 'usuario bloqueado (respuesta vacía esperada)'
+                : webhookError ? 'con error' : 'completado';
+            
             onProgress({
-                message: `${webhookError ? '❌' : '✅'} [${conv.testCase.title}] Turno ${turnNumber}/${MAX_CONVERSATION_TURNS} ${webhookError ? 'con error' : 'completado'}`,
+                message: `${displayStatus} [${conv.testCase.title}] Turno ${turnNumber}/${MAX_CONVERSATION_TURNS} ${displayMessage}`,
                 testCaseId: conv.testCase.id,
                 step: executionStep
             });
@@ -338,10 +378,19 @@ export async function runConversationIndependently(
             
             // ========== 11. VERIFICAR SI DEBE TERMINAR ==========
             
-            // Si hubo error en el webhook, terminar la conversación
-            if (webhookError) {
+            // Si hubo error REAL en el webhook (no bloqueo), terminar la conversación
+            if (webhookError && !isBlockedResponse) {
                 console.log(`   🛑 Terminando conversación por error en webhook`);
                 break;
+            }
+            
+            // 🔥 Si el usuario está bloqueado, continuar para ver si la persona respeta el bloqueo
+            if (isBlockedResponse) {
+                console.log(`   ℹ️ Usuario bloqueado - Continuando para verificar comportamiento del test persona`);
+                // La conversación continúa para ver si la persona:
+                // 1. Respeta el bloqueo y no sigue hablando
+                // 2. Intenta desbloquear escribiendo el keyword correcto
+                // 3. Ignora el bloqueo (mal comportamiento que debe penalizarse)
             }
             
             // Verificar si el objetivo fue logrado
